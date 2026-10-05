@@ -1,0 +1,32 @@
+spring:
+  application:
+    name: seat-reservation
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+      # Fail fast instead of the 30s default: a request waiting this long is better declined (429)
+      # than left hanging, and readiness reports DB-down quickly.
+      connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:10000}
+
+server:
+  # Hosting platforms inject PORT.
+  port: ${PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-components: always
+      group:
+        # Readiness must fail closed when the DB is unreachable; liveness must not,
+        # or the platform would restart-loop the app during a DB outage.
+        readiness:
+          include: readinessState,db

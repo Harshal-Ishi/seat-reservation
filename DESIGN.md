@@ -367,7 +367,7 @@ Concurrency, user count and seat count are flags.
 - **Dockerfile**, multi-stage: `eclipse-temurin:21-jdk` builds with `mvnw`; `eclipse-temurin:21-jre` runs it. Both images are multi-arch, so it runs on the Apple Silicon Mac and on Linux amd64 hosts.
 - JVM flag `-XX:MaxRAMPercentage=75`, so it fits a small free-tier container.
 - **docker-compose.yml**: `postgres:16` with a healthcheck, plus the app with `depends_on: condition: service_healthy`. `docker compose up --build` is the one command.
-- All settings come from env vars (`DATABASE_URL`, `JWT_SECRET`, `ADMIN_SECRET`, `DB_POOL_SIZE`, …), with local defaults in compose only.
+- All settings come from env vars (`DB_URL` as a JDBC URL, `DB_USERNAME`, `DB_PASSWORD`, `JWT_SECRET`, `ADMIN_SECRET`, `DB_POOL_SIZE`, `DB_CONNECTION_TIMEOUT_MS`, `PORT`), with local values in compose only.
 - Platform choice is deferred to Phase 5 (see open items).
 
 ---
