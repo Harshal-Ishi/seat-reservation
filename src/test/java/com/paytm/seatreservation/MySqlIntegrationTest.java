@@ -17,6 +17,7 @@ import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -85,10 +86,22 @@ public abstract class MySqlIntegrationTest {
         return rest.postForEntity(path, new HttpEntity<>(body, headers), String.class);
     }
 
-    /** Creates a show as admin and returns its id. */
+    /** Creates a show as admin (default per-user limit) and returns its id. */
     protected String createShow(List<String> seats, long pricePaise) {
+        return createShow(seats, pricePaise, Map.of());
+    }
+
+    protected String createShow(List<String> seats, long pricePaise, int perUserLimit) {
+        return createShow(seats, pricePaise, Map.of("per_user_limit", perUserLimit));
+    }
+
+    private String createShow(List<String> seats, long pricePaise, Map<String, Object> extraFields) {
         try {
-            String body = json.writeValueAsString(Map.of("name", "test-show", "seats", seats, "price_paise", pricePaise));
+            Map<String, Object> request = new HashMap<>(extraFields);
+            request.put("name", "test-show");
+            request.put("seats", seats);
+            request.put("price_paise", pricePaise);
+            String body = json.writeValueAsString(request);
             ResponseEntity<String> response = post("/shows", body, adminToken());
             assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
             return json.readTree(response.getBody()).get("id").asText();
@@ -144,7 +157,8 @@ public abstract class MySqlIntegrationTest {
 
     /**
      * Checks the show's state straight from the database: every seat is in exactly one state, and the
-     * confirmed seats are exactly the seats listed on confirmed reservations (no partial or orphan bookings).
+     * confirmed seats are exactly the seats listed on confirmed reservations (no partial or orphan bookings),
+     * and every user's limit counter equals the seats that user actually holds.
      */
     protected void assertConsistent(String showId) {
         Integer total = jdbc.queryForObject("SELECT total_seats FROM shows WHERE id = ?", Integer.class, showId);
@@ -169,6 +183,22 @@ public abstract class MySqlIntegrationTest {
         assertThat(stateSum).isEqualTo(total);
         assertThat(seatsOnReservations).isEqualTo(confirmedSeats);
         assertThat(seatsPointingAtConfirmedReservations).isEqualTo(confirmedSeats);
+
+        Integer countersOff = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM (
+                    SELECT u.user_id, u.seat_count, COUNT(s.seat_label) AS held
+                    FROM user_seat_counts u
+                    LEFT JOIN reservations r ON r.show_id = u.show_id AND r.user_id = u.user_id AND r.status = 'confirmed'
+                    LEFT JOIN seats s ON s.reservation_id = r.id
+                    WHERE u.show_id = ?
+                    GROUP BY u.user_id, u.seat_count
+                    HAVING u.seat_count <> held
+                ) mismatched
+                """, Integer.class, showId);
+        Integer counterTotal = jdbc.queryForObject(
+                "SELECT COALESCE(SUM(seat_count), 0) FROM user_seat_counts WHERE show_id = ?", Integer.class, showId);
+        assertThat(countersOff).as("users whose limit counter differs from seats held").isZero();
+        assertThat(counterTotal).isEqualTo(confirmedSeats);
     }
 
     private String mintToken(String requestBody) {

@@ -3,6 +3,7 @@ package com.paytm.seatreservation.service;
 import com.paytm.seatreservation.dao.ReservationDao;
 import com.paytm.seatreservation.dao.SeatDao;
 import com.paytm.seatreservation.dao.ShowDao;
+import com.paytm.seatreservation.dao.UserSeatCountDao;
 import com.paytm.seatreservation.exception.BadRequestException;
 import com.paytm.seatreservation.exception.ConflictException;
 import com.paytm.seatreservation.exception.NotFoundException;
@@ -27,15 +28,18 @@ public class ReservationService {
     private final ShowDao showDao;
     private final SeatDao seatDao;
     private final ReservationDao reservationDao;
+    private final UserSeatCountDao userSeatCountDao;
     private final TransactionRunner transactionRunner;
 
     public ReservationService(ShowDao showDao,
                               SeatDao seatDao,
                               ReservationDao reservationDao,
+                              UserSeatCountDao userSeatCountDao,
                               TransactionRunner transactionRunner) {
         this.showDao = showDao;
         this.seatDao = seatDao;
         this.reservationDao = reservationDao;
+        this.userSeatCountDao = userSeatCountDao;
         this.transactionRunner = transactionRunner;
     }
 
@@ -46,6 +50,11 @@ public class ReservationService {
     public ReserveResult reserve(UUID showId, String userId, List<String> seatLabels, String idempotencyKey) {
         Show show = showDao.findById(showId)
                 .orElseThrow(() -> new NotFoundException("Show not found"));
+        // A request bigger than the limit can never succeed. Checked here because the counter row's very first
+        // insert (seat_count 0) has no WHERE to stop it.
+        if (seatLabels.size() > show.perUserLimit()) {
+            throw perUserLimitExceeded(show);
+        }
 
         // Sorted once and used for locking, hashing and the response. Java's String order matches the
         // ascii_bin collation of seat_label, so every transaction locks overlapping seats in the same order.
@@ -67,14 +76,21 @@ public class ReservationService {
                 // Step 1: claim the key. The unique (user_id, idempotency_key) index decides, atomically.
                 reservationDao.insert(reservation);
 
-                // Step 2: lock the seats in sorted order.
+                // Step 2: the per-user limit. The guarded UPDATE runs on this user's locked counter row, so parallel
+                // requests from one user are decided one at a time, each seeing the previous ones' committed total.
+                userSeatCountDao.ensureRow(showId, userId);
+                if (userSeatCountDao.addIfWithinLimit(showId, userId, sortedLabels.size(), show.perUserLimit()) == 0) {
+                    throw perUserLimitExceeded(show);
+                }
+
+                // Step 3: lock the seats in sorted order.
                 for (String label : sortedLabels) {
                     if (seatDao.lockSeat(showId, label).isEmpty()) {
                         throw new BadRequestException("Unknown seat: " + label);
                     }
                 }
 
-                // Step 3: the atomic decision.
+                // Step 4: the atomic decision.
                 int confirmed = seatDao.confirmIfAvailable(showId, sortedLabels, reservation.id());
                 if (confirmed != sortedLabels.size()) {
                     throw new ConflictException(DeclineReason.SEAT_TAKEN, "One or more requested seats are not available");
@@ -98,6 +114,11 @@ public class ReservationService {
                     "This idempotency key was already used for a different request");
         }
         return new ReserveResult(existing, true);
+    }
+
+    private ConflictException perUserLimitExceeded(Show show) {
+        return new ConflictException(DeclineReason.PER_USER_LIMIT,
+                "A user can hold at most " + show.perUserLimit() + " seats for this show");
     }
 
     /** Identifies "the same request": same show and same set of seats, in any order. */

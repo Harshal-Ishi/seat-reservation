@@ -89,3 +89,17 @@ Per milestone: what the AI produced, and what I decided or changed.
 - Raised deadlock retries from 3 to 5 attempts after measuring: with 3, up to 5 of 50 same-key requests on a taken seat ended as 429; with 5, none across 5 runs.
 
 **Verified on the compose stack**: 400 users × 3 simultaneous sends of the same key (1,200 requests) → 100 × 201 (one per seat, one on the hot seat), 200 × 200 replays, 900 × 409, zero 5xx, no user with two reservations.
+
+## Milestone 7: Per-user limit
+
+**AI produced**
+- Flyway `V4`: `user_seat_counts (show_id, user_id, seat_count)`, backfilled from existing confirmed reservations.
+- `UserSeatCountDao`: `ensureRow` (`INSERT ... ON DUPLICATE KEY UPDATE seat_count = seat_count`, which also locks the row) and `addIfWithinLimit` (guarded `UPDATE ... WHERE seat_count + n <= limit`).
+- Reserve: request larger than the limit → 409 before the transaction; inside it, counter step runs after claiming the key and before locking seats (same global lock order). Rollback on seat-taken undoes the increment.
+- Tests (10): default limit 4, limit across requests, oversized request, multi-seat crossing the limit reserves nothing, per-show scope, declines and replays don't use quota, 10 parallel single-seat reserves on limit 4 → exactly 4, 5 parallel two-seat requests → 2, 25 users × 10 parallel → each exactly 4. `assertConsistent` now also checks every counter equals the seats that user actually holds.
+- Mutation check: a check-then-act version (plain read, then unguarded increment) lets one user get 10 seats on a limit-4 show; the tests catch it.
+
+**I decided**
+- Two plain statements instead of one `IF()` upsert: MySQL's `ON DUPLICATE KEY UPDATE` has no `WHERE`, and two statements are easier to explain.
+
+**Verified on the compose stack**: 600 users, 1,777 concurrent mixed requests (limit 4) → zero 5xx, zero deadlocks/429s, max 4 seats per user, no seat won twice, invariant holds.
