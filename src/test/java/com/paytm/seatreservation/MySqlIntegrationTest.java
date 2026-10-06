@@ -16,8 +16,15 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.function.IntFunction;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -90,12 +97,49 @@ public abstract class MySqlIntegrationTest {
         }
     }
 
+    /** Reserves with a fresh idempotency key, i.e. a new logical request. */
     protected ResponseEntity<String> reserve(String showId, String token, List<String> seats) {
+        return reserve(showId, token, seats, UUID.randomUUID().toString());
+    }
+
+    protected ResponseEntity<String> reserve(String showId, String token, List<String> seats, String idempotencyKey) {
         try {
-            return post("/shows/" + showId + "/reserve", json.writeValueAsString(Map.of("seats", seats)), token);
+            String body = json.writeValueAsString(Map.of("seats", seats, "idempotency_key", idempotencyKey));
+            return post("/shows/" + showId + "/reserve", body, token);
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    /** Releases all tasks at the same moment through a latch, so they genuinely race. */
+    protected List<ResponseEntity<String>> runConcurrently(int count, IntFunction<ResponseEntity<String>> task) {
+        CountDownLatch startGate = new CountDownLatch(1);
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            List<Future<ResponseEntity<String>>> futures = new ArrayList<>();
+            for (int i = 0; i < count; i++) {
+                int index = i;
+                futures.add(executor.submit(() -> {
+                    startGate.await();
+                    return task.apply(index);
+                }));
+            }
+            startGate.countDown();
+            List<ResponseEntity<String>> responses = new ArrayList<>();
+            for (Future<ResponseEntity<String>> future : futures) {
+                responses.add(future.get());
+            }
+            return responses;
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    protected long countStatus(List<ResponseEntity<String>> responses, HttpStatus status) {
+        return responses.stream().filter(r -> r.getStatusCode() == status).count();
+    }
+
+    protected void assertNo5xx(List<ResponseEntity<String>> responses) {
+        assertThat(responses).noneSatisfy(r -> assertThat(r.getStatusCode().is5xxServerError()).isTrue());
     }
 
     /**

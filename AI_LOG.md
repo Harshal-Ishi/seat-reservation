@@ -75,3 +75,17 @@ Per milestone: what the AI produced, and what I decided or changed.
 - Seat lookup failures inside the transaction (unknown label) are 400, checked while locking.
 
 **Verified on the compose stack**: 1,000 concurrent users on one seat → exactly 1 × 201, 999 × 409 `seat-taken`, zero 5xx, invariant holds.
+
+## Milestone 6: Idempotency
+
+**AI produced**
+- Flyway `V3`: `idempotency_key` + `request_hash` on `reservations`, `UNIQUE (user_id, idempotency_key)`; columns added nullable, backfilled, then tightened so it also runs on a non-empty table.
+- Reserve now inserts the reservation first (claims the key); `DuplicateKeyException` → read the committed row → same SHA-256 hash of (show, sorted seats) returns it with 200, a different hash is 409 `idempotency-key-reused`.
+- Key from body `idempotency_key` or `Idempotency-Key` header (must agree; required; max 128).
+- `TransactionRunner`: re-runs a transaction that InnoDB aborted as a deadlock victim (error 1213), with jittered backoff; lock wait timeouts are not retried.
+- Tests (12): replay, order-insensitive replay, different seats / different show → 409, per-user key scope, decline-then-retry is fresh, header key, body/header mismatch, invalid keys, 50 concurrent same-key requests → one 201 + 49 × 200, 50 concurrent same-key requests for a taken seat → no 5xx, 20 users × 5 concurrent retries.
+
+**I decided**
+- Raised deadlock retries from 3 to 5 attempts after measuring: with 3, up to 5 of 50 same-key requests on a taken seat ended as 429; with 5, none across 5 runs.
+
+**Verified on the compose stack**: 400 users × 3 simultaneous sends of the same key (1,200 requests) → 100 × 201 (one per seat, one on the hot seat), 200 × 200 replays, 900 × 409, zero 5xx, no user with two reservations.

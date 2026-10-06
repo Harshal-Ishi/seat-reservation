@@ -272,7 +272,7 @@ Two requests for `["A1","A2"]` and `["A2","A1"]` both lock A1 first, so neither 
 
 Why one `SELECT ... FOR UPDATE` per seat instead of one `IN (...)` query: InnoDB locks rows in the order it scans the index, and the manual does not promise that order. Locking each seat explicitly in sorted order makes the order guaranteed and visible in the code. A request has at most `per_user_limit` seats (default 4), so this is at most a handful of primary-key lookups.
 
-**Deadlock retry (safety net).** InnoDB can still deadlock in one known case that lock order does not prevent. Three requests insert the same new unique key at once (same idempotency key, or a user's first-ever counter row) and the first rolls back. The two waiters both hold shared locks and both want an exclusive one. InnoDB detects this immediately and aborts one with error 1213. Because the whole transaction rolled back, it is safe to re-run. The service retries the transaction up to 3 times with a short random backoff. If it still fails, it returns 429 `overloaded` and logs at WARN.
+**Deadlock retry (safety net).** InnoDB can still deadlock in one known case that lock order does not prevent. Three requests insert the same new unique key at once (same idempotency key, or a user's first-ever counter row) and the first rolls back. The two waiters both hold shared locks and both want an exclusive one. InnoDB detects this immediately and aborts one with error 1213. Because the whole transaction rolled back, it is safe to re-run. `TransactionRunner` re-runs the transaction up to 5 attempts with a short random backoff (10–40 ms × attempt). If it still fails, it returns 429 `overloaded` and logs at WARN. Measured: 50 concurrent same-key requests for a taken seat cause about 50 deadlock retries. With 3 attempts, 0–5 of the 50 ended as 429; with 5 attempts, none did across 5 runs.
 
 ### Cancel: one transaction, same lock order
 
@@ -305,7 +305,7 @@ A 5xx under load usually comes from something running out, not from logic. The p
 | Request threads | Tomcat pool exhausted → connections queue or time out | Virtual threads: no thread cap. Waiting requests are cheap |
 | DB connections | Hikari timeout throws → 500 | Small pool (`DB_POOL_SIZE`, default 10, under the DB's connection cap). Requests queue for a connection. Timeout (`DB_CONNECTION_TIMEOUT_MS`, default 10s) maps to **429 `overloaded`** |
 | Row-lock waits | InnoDB default `innodb_lock_wait_timeout` is 50s | Transactions are a few short statements, so locks are held for milliseconds. Session `innodb_lock_wait_timeout = 5` (set per connection by Hikari) as a backstop; error 1205 → 429 |
-| Deadlock | Error 1213 → 500 | Retry the transaction up to 3 times, then 429 (section 4) |
+| Deadlock | Error 1213 → 500 | Retry the transaction up to 5 attempts, then 429 (section 4) |
 | Expected DB errors | Duplicate key / check violation → 500 | Duplicate key on the idempotency key is caught and turned into replay/409. Everything else uses guarded updates checked by row count, not exceptions |
 
 In code, `GlobalExceptionHandler` maps `CannotCreateTransactionException` and `CannotGetJdbcConnectionException` (no connection in time) and `PessimisticLockingFailureException` (lock wait timeout or deadlock) to 429 with `Retry-After: 1`. The transaction has already rolled back, so a retry is safe.

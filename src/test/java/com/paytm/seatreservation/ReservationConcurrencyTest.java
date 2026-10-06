@@ -10,11 +10,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.function.IntFunction;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -93,39 +88,8 @@ class ReservationConcurrencyTest extends MySqlIntegrationTest {
         assertConsistent(showId);
     }
 
-    /** Releases all tasks at the same moment through a latch, so they genuinely race. */
-    private List<ResponseEntity<String>> runConcurrently(int count, IntFunction<ResponseEntity<String>> task) {
-        CountDownLatch startGate = new CountDownLatch(1);
-        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            List<Future<ResponseEntity<String>>> futures = new ArrayList<>();
-            for (int i = 0; i < count; i++) {
-                int index = i;
-                futures.add(executor.submit(() -> {
-                    startGate.await();
-                    return task.apply(index);
-                }));
-            }
-            startGate.countDown();
-            List<ResponseEntity<String>> responses = new ArrayList<>();
-            for (Future<ResponseEntity<String>> future : futures) {
-                responses.add(future.get());
-            }
-            return responses;
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
     private List<String> tokensFor(String prefix, int count) {
         return IntStream.range(0, count).mapToObj(i -> userToken(prefix + "-" + i)).toList();
-    }
-
-    private long countStatus(List<ResponseEntity<String>> responses, HttpStatus status) {
-        return responses.stream().filter(r -> r.getStatusCode() == status).count();
-    }
-
-    private void assertNo5xx(List<ResponseEntity<String>> responses) {
-        assertThat(responses).noneSatisfy(r -> assertThat(r.getStatusCode().is5xxServerError()).isTrue());
     }
 
     private void assertNoSeatWonTwice(List<ResponseEntity<String>> responses) throws Exception {

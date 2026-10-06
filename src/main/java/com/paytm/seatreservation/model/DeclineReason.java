@@ -6,6 +6,7 @@ package com.paytm.seatreservation.model;
  */
 public enum DeclineReason {
     SEAT_TAKEN("seat-taken"),
+    IDEMPOTENCY_KEY_REUSED("idempotency-key-reused"),
     OVERLOADED("overloaded");
 
     private final String value;

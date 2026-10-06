@@ -49,7 +49,7 @@ class ReservationApiTest extends MySqlIntegrationTest {
         String showId = createShow(List.of("A1"), 100);
 
         ResponseEntity<String> response = post("/shows/" + showId + "/reserve",
-                "{\"seats\": [\"A1\"], \"user_id\": \"mallory\"}", userToken("alice"));
+                "{\"seats\": [\"A1\"], \"user_id\": \"mallory\", \"idempotency_key\": \"k-spoof\"}", userToken("alice"));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         assertThat(json.readTree(response.getBody()).get("user_id").asText()).isEqualTo("alice");
@@ -123,11 +123,11 @@ class ReservationApiTest extends MySqlIntegrationTest {
 
     @ParameterizedTest
     @ValueSource(strings = {
-            "{}",
-            "{\"seats\": []}",
-            "{\"seats\": [\"A1\", \"A1\"]}",
-            "{\"seats\": [\"A 1\"]}",
-            "{\"seats\": [null]}",
+            "{\"idempotency_key\": \"k\"}",
+            "{\"seats\": [], \"idempotency_key\": \"k\"}",
+            "{\"seats\": [\"A1\", \"A1\"], \"idempotency_key\": \"k\"}",
+            "{\"seats\": [\"A 1\"], \"idempotency_key\": \"k\"}",
+            "{\"seats\": [null], \"idempotency_key\": \"k\"}",
             "{not json"
     })
     void invalidRequestIs400(String requestBody) {

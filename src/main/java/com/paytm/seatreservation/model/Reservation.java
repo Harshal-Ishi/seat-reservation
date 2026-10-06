@@ -9,5 +9,7 @@ public record Reservation(
         String userId,
         List<String> seats,
         long amountPaise,
-        ReservationStatus status) {
+        ReservationStatus status,
+        String idempotencyKey,
+        String requestHash) {
 }
