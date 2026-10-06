@@ -10,6 +10,17 @@ spring:
       # Fail fast instead of the 30s default: a request waiting this long is better declined (429)
       # than left hanging, and readiness reports DB-down quickly.
       connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:10000}
+      # MySQL defaults to REPEATABLE READ, which takes gap locks and deadlocks more under a burst.
+      # READ COMMITTED locks only the rows actually touched.
+      transaction-isolation: TRANSACTION_READ_COMMITTED
+      data-source-properties:
+        # Sends a JDBC batch as one multi-row INSERT; without it a 10,000-seat show is 10,000 round trips.
+        rewriteBatchedStatements: true
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    deserialization:
+      # Money is integer paise: reject 250.5 instead of silently truncating it to 250.
+      accept-float-as-int: false
 
 server:
   # Hosting platforms inject PORT.

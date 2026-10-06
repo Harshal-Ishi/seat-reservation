@@ -34,3 +34,17 @@ Per milestone: what the AI produced, and what I decided or changed.
 **I decided**
 - Installed JDK 21 locally, removed JDK 25.
 - Docker installed later; Docker-backed checks deferred until then.
+
+## Milestone 3: Schema, create show, show state
+
+**AI produced**
+- Flyway `V1` (MySQL 8.4): `shows` and `seats` tables, CHECK constraints (non-negative price, valid status, status/owner consistency), binary collation.
+- `ShowDao`, `SeatDao` (JdbcTemplate, batch insert of seats), `ShowService` (show + seats in one transaction, counts derived from the seat list), `ShowController` (validation, response mapping), `GlobalExceptionHandler`.
+- Integration tests against Testcontainers MySQL: create, get, 404s, 11 invalid-request cases; shared singleton container base class.
+- MySQL port of the design: READ COMMITTED isolation, two-statement per-user limit, per-seat sorted `FOR UPDATE`, deadlock-retry safety net, `JSON` seats column.
+
+**I decided**
+- Started on Postgres, then switched to MySQL 8.4 before any reservation code: I know MySQL and must explain/extend this live. GUI: MySQL Workbench.
+- `position` column so seats list in creation order.
+- Counts come from the same query as the seat list, not a separate COUNT, so they always agree.
+- `POST /shows` is open until milestone 4 adds admin auth.

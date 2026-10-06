@@ -1,15 +1,15 @@
 # Design: Seat Reservation at Scale
 
-Status: **approved**.
+Status: **approved**. Database switched from PostgreSQL to MySQL 8.4 during milestone 3. The concurrency mechanisms in section 4 are adapted to InnoDB.
 
-Source of truth for requirements: the assignment text (`PAYTM_SEAT_RESERVATION_REQUIREMENTS.md`). This document only fills gaps the assignment leaves open; every such choice is marked **Decision** and will be repeated in the README.
+Source of truth for requirements: the assignment text (`PAYTM_SEAT_RESERVATION_REQUIREMENTS.md`). It allows any datastore. This document only fills gaps the assignment leaves open; every such choice is marked **Decision** and will be repeated in the README.
 
 ---
 
 ## 1. Architecture
 
 ```
-client ──HTTP──> Spring Boot app (1 instance) ──JDBC──> PostgreSQL (1 instance)
+client ──HTTP──> Spring Boot app (1 instance) ──JDBC──> MySQL 8.4 / InnoDB (1 instance)
                    │
                    ├─ /actuator/health/{liveness,readiness}
                    └─ /actuator/prometheus
@@ -19,7 +19,9 @@ client ──HTTP──> Spring Boot app (1 instance) ──JDBC──> PostgreS
 - Database access: Spring `JdbcTemplate` + `TransactionTemplate`. No JPA.
 - Libraries: Flyway (migrations), jjwt (JWT), Micrometer Prometheus registry, logstash-logback-encoder (JSON logs). Testcontainers for integration tests.
 - No Spring Security: auth is one servlet filter that verifies the JWT. Less machinery to explain.
-- Virtual threads on (`spring.threads.virtual.enabled=true`): a request waiting for a DB connection parks cheaply instead of holding a platform thread. The DB pool becomes the only throttle.
+- Virtual threads on (`spring.threads.virtual.enabled=true`): a request waiting for a DB connection parks cheaply instead of holding a platform thread. The DB pool becomes the only throttle. Connector/J 9.x uses `ReentrantLock` rather than `synchronized`, so virtual threads don't get pinned.
+- **Isolation: READ COMMITTED** (set on the Hikari pool). MySQL's default REPEATABLE READ takes gap locks, which cause extra lock waits and deadlocks under a burst. READ COMMITTED locks only the rows actually read with `FOR UPDATE` or written.
+- `rewriteBatchedStatements=true` so the seat batch insert is one multi-row `INSERT`.
 
 ### Packages (one top-level class per file, no inner classes)
 
@@ -29,6 +31,7 @@ com.paytm.seatreservation
   service      ShowService, ReservationService, TokenService
   dao          ShowDao, SeatDao, ReservationDao, UserSeatCountDao
   dto          request/response records
+  model        records the DAOs return and the services work with
   exception    domain exceptions + GlobalExceptionHandler
   security     JwtAuthFilter, AuthenticatedUser
   observability RequestIdFilter, ReservationMetrics
@@ -41,51 +44,56 @@ Controller = HTTP + validation. Service = all business rules and transaction bou
 
 ## 2. Schema
 
+All ids, labels, statuses and keys use **`ascii_bin` / `utf8mb4_bin` (binary, case-sensitive) collation**. MySQL's default collation is case-insensitive, so `a1` and `A1` would collide on the primary key and sort differently from Java.
+
 ```sql
 CREATE TABLE shows (
-  id             UUID PRIMARY KEY,
-  name           TEXT        NOT NULL,
-  price_paise    BIGINT      NOT NULL CHECK (price_paise >= 0),
-  per_user_limit INT         NOT NULL CHECK (per_user_limit > 0),
-  total_seats    INT         NOT NULL,
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  id             CHAR(36)     ascii_bin PRIMARY KEY,   -- UUID as text: readable in Workbench
+  name           VARCHAR(100) NOT NULL,
+  price_paise    BIGINT       NOT NULL CHECK (price_paise >= 0),
+  per_user_limit INT          NOT NULL CHECK (per_user_limit > 0),
+  total_seats    INT          NOT NULL CHECK (total_seats > 0),
+  created_at     DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
 );
 
 CREATE TABLE seats (
-  show_id        UUID NOT NULL REFERENCES shows(id),
-  seat_label     TEXT NOT NULL,
-  status         TEXT NOT NULL CHECK (status IN ('available','held','confirmed')),
-  reservation_id UUID NULL,
+  show_id        CHAR(36)    ascii_bin NOT NULL REFERENCES shows(id),
+  seat_label     VARCHAR(16) ascii_bin NOT NULL,
+  position       INT         NOT NULL,  -- creation order, so listings read A1, A2, ..., A10
+  status         VARCHAR(10) ascii_bin NOT NULL CHECK (status IN ('available','held','confirmed')),
+  reservation_id CHAR(36)    ascii_bin NULL,
   PRIMARY KEY (show_id, seat_label),
-  CHECK ((status = 'available') = (reservation_id IS NULL))
+  CHECK ((status = 'available') = (reservation_id IS NULL)),
+  INDEX seats_reservation_idx (reservation_id)           -- added with reservations (milestone 5)
 );
-CREATE INDEX seats_reservation_idx ON seats (reservation_id);
 
 CREATE TABLE reservations (
-  id              UUID PRIMARY KEY,
-  show_id         UUID   NOT NULL REFERENCES shows(id),
-  user_id         TEXT   NOT NULL,
-  seats           TEXT[] NOT NULL,
-  amount_paise    BIGINT NOT NULL,
-  status          TEXT   NOT NULL CHECK (status IN ('confirmed','cancelled')),
-  idempotency_key TEXT   NOT NULL,
-  request_hash    TEXT   NOT NULL,
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  cancelled_at    TIMESTAMPTZ NULL,
-  UNIQUE (user_id, idempotency_key)
+  id              CHAR(36)     ascii_bin PRIMARY KEY,
+  show_id         CHAR(36)     ascii_bin NOT NULL REFERENCES shows(id),
+  user_id         VARCHAR(64)  ascii_bin NOT NULL,
+  seats           JSON         NOT NULL,                 -- e.g. ["A12","A13"]; MySQL has no array type
+  amount_paise    BIGINT       NOT NULL,
+  status          VARCHAR(10)  ascii_bin NOT NULL CHECK (status IN ('confirmed','cancelled')),
+  idempotency_key VARCHAR(128) utf8mb4_bin NOT NULL,
+  request_hash    CHAR(64)     ascii_bin NOT NULL,
+  created_at      DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  cancelled_at    DATETIME(3)  NULL,
+  UNIQUE KEY reservations_user_key (user_id, idempotency_key)
 );
 
 CREATE TABLE user_seat_counts (
-  show_id    UUID NOT NULL REFERENCES shows(id),
-  user_id    TEXT NOT NULL,
-  seat_count INT  NOT NULL CHECK (seat_count >= 0),
+  show_id    CHAR(36)    ascii_bin NOT NULL REFERENCES shows(id),
+  user_id    VARCHAR(64) ascii_bin NOT NULL,
+  seat_count INT         NOT NULL CHECK (seat_count >= 0),
   PRIMARY KEY (show_id, user_id)
 );
 ```
 
+All tables are InnoDB. CHECK constraints are enforced since MySQL 8.0.16.
+
 Why this shape:
 
-- **One row per seat, one status column.** A seat cannot be in two states, so `available + held + confirmed == total_seats` holds by construction. `GET /shows/{id}` counts with one `GROUP BY` statement, which reads one consistent snapshot, so the invariant holds even mid-burst.
+- **One row per seat, one status column.** A seat cannot be in two states, so `available + held + confirmed == total_seats` holds by construction. `GET /shows/{id}` reads all seats in one statement and derives the counts from that same result, so the list and the counts come from one snapshot and agree even mid-burst.
 - **The reservation row is the idempotency record.** Declines are not stored (agreed: a retry after a decline is a fresh attempt), so a key only needs a row when a reservation exists. `UNIQUE (user_id, idempotency_key)` makes "reserve twice with one key" impossible. No separate idempotency table.
 - **`user_seat_counts`** gives the per-user limit one row to lock and update conditionally, instead of counting seats under a race.
 - The CHECK on `seats` stops a bug from ever leaving a confirmed seat with no owner, or an available seat with one.
@@ -176,7 +184,7 @@ Test-harness endpoint so a burst can mint tokens for thousands of users.
 | any requested seat not available (all-or-nothing) | 409 | `seat-taken` |
 | would exceed `per_user_limit` | 409 | `per-user-limit` |
 | same key, different show or seats | 409 | `idempotency-key-reused` |
-| could not get a DB connection or row lock in time | 429 | `overloaded` |
+| could not get a DB connection or row lock in time, or deadlock retries exhausted | 429 | `overloaded` |
 | no/invalid token | 401 | |
 | unknown show | 404 | |
 | empty seats, duplicate seats, unknown seat label, missing key, key > 128 chars, bad JSON | 400 | |
@@ -209,7 +217,7 @@ Every response carries `X-Request-Id`.
 
 ---
 
-## 4. Concurrency design
+## 4. Concurrency design (MySQL / InnoDB)
 
 ### Reserve: one transaction, READ COMMITTED
 
@@ -220,71 +228,68 @@ Every response carries `X-Request-Id`.
 BEGIN
 1. Claim the idempotency key
    INSERT INTO reservations (...) VALUES (...)
-   ON CONFLICT (user_id, idempotency_key) DO NOTHING
-   → 0 rows: key already used. SELECT it; same hash → 200 replay, else 409. Stop.
+   → duplicate key (MySQL error 1062): key already used.
+     ROLLBACK, SELECT the existing row; same hash → 200 replay, else 409. Stop.
 
-2. Per-user limit
-   INSERT INTO user_seat_counts (show_id, user_id, seat_count) VALUES (?, ?, :n)
-   ON CONFLICT (show_id, user_id) DO UPDATE
-     SET seat_count = user_seat_counts.seat_count + EXCLUDED.seat_count
-     WHERE user_seat_counts.seat_count + EXCLUDED.seat_count <= :limit
-   → 0 rows: over limit → ROLLBACK, 409 per-user-limit.
+2. Per-user limit (two statements)
+   a. INSERT INTO user_seat_counts (show_id, user_id, seat_count) VALUES (?, ?, 0)
+      ON DUPLICATE KEY UPDATE seat_count = seat_count        -- make sure the row exists; no-op if it does
+   b. UPDATE user_seat_counts SET seat_count = seat_count + :n
+      WHERE show_id = ? AND user_id = ? AND seat_count + :n <= :limit
+      → 0 rows: over limit → ROLLBACK, 409 per-user-limit.
 
-3. Lock the seats in a fixed order
-   SELECT seat_label, status FROM seats
-   WHERE show_id = ? AND seat_label = ANY(?)
-   ORDER BY seat_label
-   FOR UPDATE
-   → fewer rows than requested: unknown label → ROLLBACK, 400.
+3. Lock the seats in a fixed order, one statement per seat, labels sorted in Java
+   SELECT status FROM seats WHERE show_id = ? AND seat_label = ? FOR UPDATE
+   → no row: unknown label → ROLLBACK, 400.
 
 4. Claim the seats (the atomic decision)
    UPDATE seats SET status = 'confirmed', reservation_id = ?
-   WHERE show_id = ? AND seat_label = ANY(?) AND status = 'available'
+   WHERE show_id = ? AND seat_label IN (?, ?, ...) AND status = 'available'
    → rows updated < requested: some seat taken → ROLLBACK, 409 seat-taken.
 COMMIT
 ```
 
 Why it is race-free:
 
-- **No double-sell.** Step 4 changes a seat only if its status is still `available`, and that check and write happen in one statement on a row this transaction has locked. For a hot seat, 500 transactions queue on the row lock. The first commits `confirmed`; each of the rest then sees `confirmed`, updates 0 rows, and gets 409. Exactly one 201.
-- **Per-user limit.** The conditional upsert in step 2 locks the user's counter row. Ten parallel requests from one user run step 2 one at a time, each seeing the committed total of the ones before. A rollback (say, seat taken) also undoes the increment, so the count never drifts. Requests bigger than the limit on their own are rejected in step 0, because the first insert in step 2 has no `WHERE` to catch them.
-- **Idempotency.** The unique index makes a second row for the same key impossible. Two concurrent requests with one key: the second `INSERT` waits on the first's uncommitted index entry. If the first commits, the second hits the conflict, reads the committed row, and replays it (200). If the first rolls back (seat taken), the second proceeds as a fresh attempt. Either way at most one reservation exists per key.
+- **No double-sell.** Step 4 changes a seat only if its status is still `available`, and that check and write happen in one statement on a row this transaction has locked. For a hot seat, 500 transactions queue on the row lock taken in step 3. The first commits `confirmed`. Each of the rest then gets the lock; in InnoDB a locking read (`FOR UPDATE`) and an `UPDATE` always see the latest committed row, so they see `confirmed`, update 0 rows, and get 409. Exactly one 201.
+- **Per-user limit.** Step 2b is a guarded update on the user's counter row, so it takes that row's lock. Ten parallel requests from one user run 2b one at a time, each seeing the committed total of the ones before. A rollback (say, seat taken) also undoes the increment, so the count never drifts. Requests bigger than the limit on their own are rejected in step 0.
+  - Why two statements and not one upsert: MySQL's `ON DUPLICATE KEY UPDATE` has no `WHERE`. A guarded single upsert needs an `IF()` expression and a driver flag (`useAffectedRows`) to tell "updated" from "unchanged". Two plain statements are easier to read and to explain.
+- **Idempotency.** The unique key makes a second row for the same key impossible. Two concurrent requests with one key: the second `INSERT` waits on the first's uncommitted index entry. If the first commits, the second gets error 1062, reads the committed row, and replays it (200). If the first rolls back (seat taken), the second's insert succeeds and it proceeds as a fresh attempt. Either way at most one reservation exists per key.
+  - In MySQL a duplicate-key error does not abort the transaction (unlike Postgres), but we roll back anyway: nothing else has happened yet.
 - **All-or-nothing.** Steps 1–4 are one transaction. Any failure rolls back everything: no reservation, no counter change, no seat changed.
 
 ### Deadlock avoidance
 
 Every transaction takes locks in one global order:
 
-1. reservation row / key index entry
-2. `user_seat_counts` row
-3. seat rows, **sorted by `seat_label`** (the `ORDER BY ... FOR UPDATE` in step 3)
+1. the reservation's unique-key entry
+2. the `user_seat_counts` row
+3. seat rows, **sorted by `seat_label`**, locked one at a time in step 3
 
-Two requests for `["A1","A2"]` and `["A2","A1"]` both lock A1 first, so neither can hold A2 while waiting for A1. No cycle, no deadlock.
+Two requests for `["A1","A2"]` and `["A2","A1"]` both lock A1 first, so neither can hold A2 while waiting for A1. No cycle.
 
-Step 3 is not a read-then-write. It takes the locks in order; the decision is still the guarded `UPDATE` in step 4. Without step 3, `UPDATE ... ANY(?)` would lock rows in whatever order Postgres scans them, which is not guaranteed.
+Why one `SELECT ... FOR UPDATE` per seat instead of one `IN (...)` query: InnoDB locks rows in the order it scans the index, and the manual does not promise that order. Locking each seat explicitly in sorted order makes the order guaranteed and visible in the code. A request has at most `per_user_limit` seats (default 4), so this is at most a handful of primary-key lookups.
 
-Safety net: if Postgres still reports a deadlock (`40P01`), map it to 409 and log at ERROR. Should never happen; if it does we want to see it.
+**Deadlock retry (safety net).** InnoDB can still deadlock in one known case that lock order does not prevent. Three requests insert the same new unique key at once (same idempotency key, or a user's first-ever counter row) and the first rolls back. The two waiters both hold shared locks and both want an exclusive one. InnoDB detects this immediately and aborts one with error 1213. Because the whole transaction rolled back, it is safe to re-run. The service retries the transaction up to 3 times with a short random backoff. If it still fails, it returns 429 `overloaded` and logs at WARN.
 
 ### Cancel: one transaction, same lock order
 
 ```
 BEGIN
-1. UPDATE reservations SET status='cancelled', cancelled_at=now()
-   WHERE id = ? AND user_id = :tokenUser AND status = 'confirmed'
-   RETURNING show_id, seats
-   → 0 rows: SELECT reservation: missing → 404, other owner → 403,
-     already cancelled → 200 (same body).
-2. UPDATE user_seat_counts SET seat_count = seat_count - :n
-   WHERE show_id = ? AND user_id = ?
-3. SELECT ... FROM seats WHERE reservation_id = ? ORDER BY seat_label FOR UPDATE
-4. UPDATE seats SET status='available', reservation_id=NULL
-   WHERE reservation_id = ?
+1. SELECT user_id, show_id, seats, status FROM reservations WHERE id = ? FOR UPDATE
+   → missing → 404; user_id ≠ token user → 403; already cancelled → 200 (same body).
+2. UPDATE reservations SET status = 'cancelled', cancelled_at = NOW(3) WHERE id = ?
+3. UPDATE user_seat_counts SET seat_count = seat_count - :n WHERE show_id = ? AND user_id = ?
+4. Lock this reservation's seats, sorted by label (same as reserve step 3)
+5. UPDATE seats SET status = 'available', reservation_id = NULL WHERE reservation_id = ?
 COMMIT
 ```
 
-- **Owner only.** The `user_id = :tokenUser` guard is in the `WHERE`, so it is atomic, not a separate check.
-- **Never resurrects someone else's seat.** Step 4 frees only seats whose `reservation_id` is this reservation. A seat re-booked by someone else carries their reservation id and is untouched.
-- **Cancel twice in parallel.** The second waits on the reservation row lock, then finds `status='cancelled'`, updates 0 rows, and returns 200 without decrementing again.
+MySQL has no `UPDATE ... RETURNING`, so step 1 reads the reservation with `FOR UPDATE`. The row is locked from that point, so the owner and status checks cannot go stale before step 2.
+
+- **Owner only.** The reservation row is locked before the owner check, and nothing can change it until commit.
+- **Never resurrects someone else's seat.** Step 5 frees only seats whose `reservation_id` is this reservation. A seat re-booked by someone else carries their reservation id and is untouched.
+- **Cancel twice in parallel.** The second waits on the reservation row lock, then finds `status = 'cancelled'` and returns 200 without decrementing again.
 - Same lock order as reserve (reservation → counter → sorted seats), so cancel and reserve cannot deadlock.
 
 ---
@@ -297,9 +302,9 @@ A 5xx under load usually comes from something running out, not from logic. The p
 |---|---|---|
 | Request threads | Tomcat pool exhausted → connections queue or time out | Virtual threads: no thread cap. Waiting requests are cheap |
 | DB connections | Hikari timeout throws → 500 | Small pool (`DB_POOL_SIZE`, default 10, under the DB's connection cap). Requests queue for a connection. Timeout (`DB_CONNECTION_TIMEOUT_MS`, default 10s) maps to **429 `overloaded`** |
-| Row-lock waits | Long hot-seat queue | Transactions are 4 short statements, so locks are held for milliseconds. `lock_timeout` (5s) as a backstop → 429 |
-| Runaway statement | Hangs a connection | `statement_timeout` (10s) → 429 |
-| Expected DB errors | Unique / check violation → 500 | Avoided with `ON CONFLICT` and conditional updates, not exceptions. Any that slip through map to 4xx |
+| Row-lock waits | InnoDB default `innodb_lock_wait_timeout` is 50s | Transactions are a few short statements, so locks are held for milliseconds. Session `innodb_lock_wait_timeout = 5` (set per connection by Hikari) as a backstop; error 1205 → 429 |
+| Deadlock | Error 1213 → 500 | Retry the transaction up to 3 times, then 429 (section 4) |
+| Expected DB errors | Duplicate key / check violation → 500 | Duplicate key on the idempotency key is caught and turned into replay/409. Everything else uses guarded updates checked by row count, not exceptions |
 
 Genuine bugs still return 500. We hide nothing; we just make sure load alone never produces one.
 
@@ -366,21 +371,21 @@ Concurrency, user count and seat count are flags.
 
 - **Dockerfile**, multi-stage: `eclipse-temurin:21-jdk` builds with `mvnw`; `eclipse-temurin:21-jre` runs it. Both images are multi-arch, so it runs on the Apple Silicon Mac and on Linux amd64 hosts.
 - JVM flag `-XX:MaxRAMPercentage=75`, so it fits a small free-tier container.
-- **docker-compose.yml**: `postgres:16` with a healthcheck, plus the app with `depends_on: condition: service_healthy`. `docker compose up --build` is the one command.
+- **docker-compose.yml**: `mysql:8.4` with a healthcheck, plus the app with `depends_on: condition: service_healthy`. `docker compose up --build` is the one command.
 - All settings come from env vars (`DB_URL` as a JDBC URL, `DB_USERNAME`, `DB_PASSWORD`, `JWT_SECRET`, `ADMIN_SECRET`, `DB_POOL_SIZE`, `DB_CONNECTION_TIMEOUT_MS`, `PORT`), with local values in compose only.
-- Platform choice is deferred to Phase 5 (see open items).
+- Platform choice is deferred to Phase 5. Constraint: **free only, no card**. Free MySQL hosting is scarcer than Postgres. To verify then: a free MySQL 8 tier (e.g. Aiven free plan). Avoid MySQL-compatible engines like TiDB, whose locking behaves differently from InnoDB and would invalidate section 4.
 
 ---
 
 ## 9. Testing
 
 - **Unit:** request hashing, validation, amount calculation.
-- **Integration** (Testcontainers Postgres): every status code in section 3.
+- **Integration** (Testcontainers `mysql:8.4`): every status code in section 3.
 - **Concurrency** (Testcontainers, many threads released at once by a latch):
   - 200 threads on one seat → exactly one 201, rest 409
   - multi-seat overlapping requests in opposite orders → no deadlock, no partial booking
   - one user, 10 parallel reserves, limit 4 → at most 4 seats
-  - same key from 50 threads → one reservation, the rest 200 replay
+  - same key from 50 threads → one reservation, the rest 200 replay (exercises the deadlock retry)
   - reserve vs cancel races → invariant holds, no resurrected seat
   - after each test: `available + held + confirmed == total`, and `user_seat_counts` equals the actual confirmed seats per user
 
@@ -388,8 +393,9 @@ Concurrency, user count and seat count are flags.
 
 ## 10. Resolved items
 
-1. **Docker:** installed later, before milestone 2 (compose) and the integration tests.
+1. **Docker:** installed.
 2. **JDK:** Java 21 locally and in the image.
 3. **Build tool:** Maven with wrapper.
 4. **Burst script:** single-file Java.
-5. **Deploy platform:** decided in Phase 5, after a local burst shows how much CPU we need.
+5. **Database:** MySQL 8.4, chosen for the candidate's familiarity. GUI: MySQL Workbench.
+6. **Deploy platform:** decided in Phase 5, free tiers only.

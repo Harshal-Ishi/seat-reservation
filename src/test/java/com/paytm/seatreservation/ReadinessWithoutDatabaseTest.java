@@ -11,14 +11,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Points the app at a port where nothing listens, so it runs without Docker.
+ * Flyway is off because migrations need a database at startup; this test is only about the probes.
  */
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {
-                "DB_URL=jdbc:postgresql://localhost:1/unreachable",
+                "DB_URL=jdbc:mysql://localhost:1/unreachable",
                 "DB_USERNAME=unused",
                 "DB_PASSWORD=unused",
-                "DB_CONNECTION_TIMEOUT_MS=1000"
+                "DB_CONNECTION_TIMEOUT_MS=1000",
+                "spring.flyway.enabled=false"
         })
 class ReadinessWithoutDatabaseTest {
 
