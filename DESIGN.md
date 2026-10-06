@@ -308,6 +308,8 @@ A 5xx under load usually comes from something running out, not from logic. The p
 | Deadlock | Error 1213 → 500 | Retry the transaction up to 3 times, then 429 (section 4) |
 | Expected DB errors | Duplicate key / check violation → 500 | Duplicate key on the idempotency key is caught and turned into replay/409. Everything else uses guarded updates checked by row count, not exceptions |
 
+In code, `GlobalExceptionHandler` maps `CannotCreateTransactionException` and `CannotGetJdbcConnectionException` (no connection in time) and `PessimisticLockingFailureException` (lock wait timeout or deadlock) to 429 with `Retry-After: 1`. The transaction has already rolled back, so a retry is safe.
+
 Genuine bugs still return 500. We hide nothing; we just make sure load alone never produces one.
 
 Counters are incremented **after** commit, so a rolled-back attempt is never counted as confirmed.

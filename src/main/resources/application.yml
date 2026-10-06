@@ -1,6 +1,11 @@
 spring:
   application:
     name: seat-reservation
+  threads:
+    virtual:
+      # A request waiting for a DB connection parks a cheap virtual thread instead of holding one of
+      # Tomcat's 200 platform threads, so a burst queues on the connection pool rather than on threads.
+      enabled: true
   datasource:
     url: ${DB_URL}
     username: ${DB_USERNAME}
@@ -13,6 +18,9 @@ spring:
       # MySQL defaults to REPEATABLE READ, which takes gap locks and deadlocks more under a burst.
       # READ COMMITTED locks only the rows actually touched.
       transaction-isolation: TRANSACTION_READ_COMMITTED
+      # InnoDB waits 50s for a row lock by default. A request stuck that long is better declined (429)
+      # so its connection goes back to the pool.
+      connection-init-sql: SET SESSION innodb_lock_wait_timeout = ${DB_LOCK_WAIT_TIMEOUT_SECONDS:5}
       data-source-properties:
         # Sends a JDBC batch as one multi-row INSERT; without it a 10,000-seat show is 10,000 round trips.
         rewriteBatchedStatements: true

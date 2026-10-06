@@ -6,7 +6,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 @Repository
@@ -28,6 +30,45 @@ public class SeatDao {
                 INSERT INTO seats (show_id, seat_label, position, status)
                 VALUES (?, ?, ?, ?)
                 """, rows);
+    }
+
+    /**
+     * Locks one seat row until the transaction ends and returns its current status, or empty if the
+     * show has no such seat. Callers lock seats one at a time in sorted order so that two requests
+     * for overlapping seats always take their locks in the same order and cannot deadlock.
+     */
+    public Optional<SeatStatus> lockSeat(UUID showId, String seatLabel) {
+        return jdbc.query("""
+                                SELECT status
+                                FROM seats
+                                WHERE show_id = ? AND seat_label = ?
+                                FOR UPDATE
+                                """,
+                        (rs, rowNum) -> SeatStatus.fromValue(rs.getString("status")),
+                        showId.toString(), seatLabel)
+                .stream()
+                .findFirst();
+    }
+
+    /**
+     * The atomic decision: confirms the seats only where they are still available, in one statement.
+     * Returns how many rows changed; fewer than requested means at least one seat was already taken.
+     */
+    public int confirmIfAvailable(UUID showId, List<String> seatLabels, UUID reservationId) {
+        // Only "?" placeholders are joined into the SQL; the labels themselves are bound as parameters.
+        String placeholders = String.join(", ", Collections.nCopies(seatLabels.size(), "?"));
+        List<Object> params = new ArrayList<>(seatLabels.size() + 3);
+        params.add(SeatStatus.CONFIRMED.value());
+        params.add(reservationId.toString());
+        params.add(showId.toString());
+        params.addAll(seatLabels);
+        params.add(SeatStatus.AVAILABLE.value());
+        return jdbc.update("""
+                        UPDATE seats
+                        SET status = ?, reservation_id = ?
+                        WHERE show_id = ? AND seat_label IN (%s) AND status = ?
+                        """.formatted(placeholders),
+                params.toArray());
     }
 
     public List<Seat> findByShowId(UUID showId) {

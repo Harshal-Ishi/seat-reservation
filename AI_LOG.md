@@ -60,3 +60,18 @@ Per milestone: what the AI produced, and what I decided or changed.
 **I decided**
 - No Spring Security; argument resolver instead of a servlet filter so auth errors share the normal error handler.
 - Token endpoint is open by design (load test needs many users); documented as a stand-in for an identity provider.
+
+## Milestone 5: Atomic reserve (single and multi-seat)
+
+**AI produced**
+- Flyway `V2`: `reservations` table (seats as JSON), index on `seats.reservation_id`.
+- `ReservationService.reserve`: one READ COMMITTED transaction: insert reservation, lock each seat with `SELECT ... FOR UPDATE` in sorted label order, then the guarded `UPDATE ... WHERE status = 'available'`; fewer rows than requested rolls back to 409 `seat-taken` (all-or-nothing).
+- `ReservationController` (`POST /shows/{id}/reserve`), shared `RequestValidator`, `ConflictException` + `DeclineReason`, 429 `overloaded` mapping for pool/lock timeouts, `innodb_lock_wait_timeout = 5`, virtual threads on.
+- Tests: 16 API tests (incl. spoofed `user_id` in body ignored, partial request reserves nothing) and 3 concurrency tests (200-user hot seat, opposite-order multi-seat, 400-request stampede) with DB-level consistency checks.
+- Mutation check: replacing the guarded update with a naive read-then-write makes all 3 concurrency tests fail ("seat won twice"), so the tests really race.
+
+**I decided**
+- Idempotency (milestone 6) and per-user limit (milestone 7) kept out of this commit, each with its own migration.
+- Seat lookup failures inside the transaction (unknown label) are 400, checked while locking.
+
+**Verified on the compose stack**: 1,000 concurrent users on one seat → exactly 1 × 201, 999 × 409 `seat-taken`, zero 5xx, invariant holds.

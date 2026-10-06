@@ -1,15 +1,24 @@
 package com.paytm.seatreservation.exception;
 
 import com.paytm.seatreservation.dto.ErrorResponse;
+import com.paytm.seatreservation.model.DeclineReason;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.jdbc.CannotGetJdbcConnectionException;
+import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+    private static final String RETRY_AFTER_SECONDS = "1";
 
     @ExceptionHandler(BadRequestException.class)
     public ResponseEntity<ErrorResponse> handleBadRequest(BadRequestException e) {
@@ -37,6 +46,29 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(NotFoundException.class)
     public ResponseEntity<ErrorResponse> handleNotFound(NotFoundException e) {
         return error(HttpStatus.NOT_FOUND, "not-found", e.getMessage());
+    }
+
+    @ExceptionHandler(ConflictException.class)
+    public ResponseEntity<ErrorResponse> handleConflict(ConflictException e) {
+        return error(HttpStatus.CONFLICT, e.reason().value(), e.getMessage());
+    }
+
+    /**
+     * The service is saturated, not broken: no DB connection within the pool timeout
+     * (CannotCreateTransactionException / CannotGetJdbcConnectionException), or a row lock not granted within
+     * innodb_lock_wait_timeout or lost to a deadlock (PessimisticLockingFailureException). The transaction has
+     * already rolled back, so nothing changed and the client can safely retry. A 5xx here would be wrong.
+     */
+    @ExceptionHandler({
+            CannotCreateTransactionException.class,
+            CannotGetJdbcConnectionException.class,
+            PessimisticLockingFailureException.class
+    })
+    public ResponseEntity<ErrorResponse> handleOverload(RuntimeException e) {
+        log.warn("Declined as overloaded: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .header(HttpHeaders.RETRY_AFTER, RETRY_AFTER_SECONDS)
+                .body(new ErrorResponse(DeclineReason.OVERLOADED.value(), "Too many requests right now; retry shortly"));
     }
 
     private ResponseEntity<ErrorResponse> error(HttpStatus status, String error, String message) {
