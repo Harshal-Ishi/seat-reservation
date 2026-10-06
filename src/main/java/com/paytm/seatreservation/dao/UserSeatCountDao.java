@@ -40,4 +40,14 @@ public class UserSeatCountDao {
                         """,
                 seats, showId.toString(), userId, seats, limit);
     }
+
+    /** Gives seats back to the user's quota. Returns rows changed; 0 would mean the counter is already too low. */
+    public int subtract(UUID showId, String userId, int seats) {
+        return jdbc.update("""
+                        UPDATE user_seat_counts
+                        SET seat_count = seat_count - ?
+                        WHERE show_id = ? AND user_id = ? AND seat_count >= ?
+                        """,
+                seats, showId.toString(), userId, seats);
+    }
 }

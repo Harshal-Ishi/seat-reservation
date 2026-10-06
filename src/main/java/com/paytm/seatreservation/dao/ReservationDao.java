@@ -68,6 +68,28 @@ public class ReservationDao {
                 .findFirst();
     }
 
+    /** Reads the reservation and locks its row until the transaction ends, so its owner and status can't change underneath us. */
+    public Optional<Reservation> findByIdForUpdate(UUID id) {
+        return jdbc.query("""
+                                SELECT id, show_id, user_id, seats, amount_paise, status, idempotency_key, request_hash
+                                FROM reservations
+                                WHERE id = ?
+                                FOR UPDATE
+                                """,
+                        rowMapper, id.toString())
+                .stream()
+                .findFirst();
+    }
+
+    public void markCancelled(UUID id) {
+        jdbc.update("""
+                        UPDATE reservations
+                        SET status = ?, cancelled_at = CURRENT_TIMESTAMP(3)
+                        WHERE id = ?
+                        """,
+                ReservationStatus.CANCELLED.value(), id.toString());
+    }
+
     private String toJson(List<String> seats) {
         try {
             return objectMapper.writeValueAsString(seats);

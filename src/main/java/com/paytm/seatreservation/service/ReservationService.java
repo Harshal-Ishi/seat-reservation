@@ -6,6 +6,7 @@ import com.paytm.seatreservation.dao.ShowDao;
 import com.paytm.seatreservation.dao.UserSeatCountDao;
 import com.paytm.seatreservation.exception.BadRequestException;
 import com.paytm.seatreservation.exception.ConflictException;
+import com.paytm.seatreservation.exception.ForbiddenException;
 import com.paytm.seatreservation.exception.NotFoundException;
 import com.paytm.seatreservation.model.DeclineReason;
 import com.paytm.seatreservation.model.Reservation;
@@ -100,6 +101,45 @@ public class ReservationService {
             return replayExisting(userId, idempotencyKey, requestHash);
         }
         return new ReserveResult(reservation, false);
+    }
+
+    /**
+     * Cancels the caller's reservation and returns its seats to the pool. Only the owner may cancel.
+     * Cancelling an already-cancelled reservation is a no-op that returns it again, so a retried cancel is safe.
+     * Locks are taken in the same order as reserve (reservation → counter → sorted seats), so the two can't deadlock.
+     */
+    public Reservation cancel(UUID reservationId, String userId) {
+        return transactionRunner.runWithDeadlockRetry(() -> {
+            // Locking the row first means the owner and status checks below can't go stale before we write.
+            Reservation reservation = reservationDao.findByIdForUpdate(reservationId)
+                    .orElseThrow(() -> new NotFoundException("Reservation not found"));
+            if (!reservation.userId().equals(userId)) {
+                throw new ForbiddenException("Only the owner can cancel this reservation");
+            }
+            if (reservation.status() == ReservationStatus.CANCELLED) {
+                return reservation;
+            }
+
+            int seatCount = reservation.seats().size();
+            reservationDao.markCancelled(reservationId);
+            if (userSeatCountDao.subtract(reservation.showId(), userId, seatCount) != 1) {
+                throw new IllegalStateException("Seat counter for user " + userId + " is lower than a confirmed reservation");
+            }
+            // Stored seats are already sorted, so this matches the lock order used by reserve.
+            for (String label : reservation.seats()) {
+                seatDao.lockSeat(reservation.showId(), label);
+            }
+            int released = seatDao.releaseByReservation(reservationId);
+            if (released != seatCount) {
+                throw new IllegalStateException("Reservation " + reservationId + " held " + released + " seats, expected " + seatCount);
+            }
+            return withStatus(reservation, ReservationStatus.CANCELLED);
+        });
+    }
+
+    private Reservation withStatus(Reservation reservation, ReservationStatus status) {
+        return new Reservation(reservation.id(), reservation.showId(), reservation.userId(), reservation.seats(),
+                reservation.amountPaise(), status, reservation.idempotencyKey(), reservation.requestHash());
     }
 
     /**

@@ -46,6 +46,13 @@ public class ReservationController {
                 .body(toResponse(result.reservation()));
     }
 
+    /** Owner only. 200 with the cancelled reservation, also when it was already cancelled. */
+    @PostMapping("/reservations/{reservationId}/cancel")
+    public ReservationResponse cancel(AuthenticatedUser caller, @PathVariable String reservationId) {
+        UUID id = RequestValidator.parseIdOrNotFound(reservationId, "Reservation not found");
+        return toResponse(reservationService.cancel(id, caller.userId()));
+    }
+
     /** Body field or Idempotency-Key header; if both are sent they must agree. */
     private String resolveIdempotencyKey(String bodyKey, String headerKey) {
         if (bodyKey != null && headerKey != null && !bodyKey.equals(headerKey)) {

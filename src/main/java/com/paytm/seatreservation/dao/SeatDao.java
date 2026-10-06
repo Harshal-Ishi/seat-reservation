@@ -71,6 +71,19 @@ public class SeatDao {
                 params.toArray());
     }
 
+    /**
+     * Frees only the seats that belong to this reservation. A seat already re-booked by someone else carries their
+     * reservation id, so it can never match here: a release can't resurrect another user's seat.
+     */
+    public int releaseByReservation(UUID reservationId) {
+        return jdbc.update("""
+                        UPDATE seats
+                        SET status = ?, reservation_id = NULL
+                        WHERE reservation_id = ?
+                        """,
+                SeatStatus.AVAILABLE.value(), reservationId.toString());
+    }
+
     public List<Seat> findByShowId(UUID showId) {
         return jdbc.query("""
                         SELECT seat_label, status

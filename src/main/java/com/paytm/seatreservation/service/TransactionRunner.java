@@ -8,6 +8,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.sql.SQLException;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Supplier;
 
 /**
  * Runs a transaction, and re-runs it if InnoDB picked it as a deadlock victim.
@@ -32,10 +33,16 @@ public class TransactionRunner {
     }
 
     public void runWithDeadlockRetry(Runnable work) {
+        runWithDeadlockRetry(() -> {
+            work.run();
+            return null;
+        });
+    }
+
+    public <T> T runWithDeadlockRetry(Supplier<T> work) {
         for (int attempt = 1; ; attempt++) {
             try {
-                transactionTemplate.executeWithoutResult(status -> work.run());
-                return;
+                return transactionTemplate.execute(status -> work.get());
             } catch (PessimisticLockingFailureException e) {
                 if (!isDeadlock(e) || attempt == MAX_ATTEMPTS) {
                     throw e;

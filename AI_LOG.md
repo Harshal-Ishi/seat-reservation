@@ -103,3 +103,17 @@ Per milestone: what the AI produced, and what I decided or changed.
 - Two plain statements instead of one `IF()` upsert: MySQL's `ON DUPLICATE KEY UPDATE` has no `WHERE`, and two statements are easier to explain.
 
 **Verified on the compose stack**: 600 users, 1,777 concurrent mixed requests (limit 4) → zero 5xx, zero deadlocks/429s, max 4 seats per user, no seat won twice, invariant holds.
+
+## Milestone 8: Cancel
+
+**AI produced**
+- `POST /reservations/{id}/cancel` (owner only): one transaction, same lock order as reserve. Lock the reservation row (`SELECT ... FOR UPDATE`), check owner (403) and status (already cancelled → 200, no-op), mark cancelled, decrement the counter (guarded, must hit exactly one row), lock the seats in sorted order, free only seats whose `reservation_id` is this reservation.
+- `TransactionRunner` now also returns a value (cancel returns the reservation).
+- Tests (12): cancel frees seats, rebookable by others, quota returned, double cancel, other user / admin → 403, 404/401, replaying the reserve key after cancel returns the cancelled reservation without rebooking, late cancel never touches a seat now owned by someone else, 30 parallel cancels, cancel racing a 50-buyer storm on the same seat, reserve/cancel churn.
+- Mutation check: freeing seats by label (ignoring which reservation owns them) and skipping the status check makes the "late cancel" test fail (it resurrected Bob's seat).
+
+**I decided**
+- Only the owner can cancel; an admin token is not an owner (the assignment says "only the owner may cancel").
+- Cancel is idempotent: cancelling an already-cancelled reservation returns 200 with it, so client retries are safe.
+
+**Verified on the compose stack**: 684 concurrent cancels/reserves (100 owners cancelling, some twice; 500 buyers storming the released seats; 50 strangers trying to cancel others' reservations) → 134 × 200, 50 × 403, 93 × 201 (no seat won twice), 407 × 409, zero 5xx, invariant holds, every counter matches seats held.
