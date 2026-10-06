@@ -5,9 +5,11 @@ import com.paytm.seatreservation.dto.SeatCountsResponse;
 import com.paytm.seatreservation.dto.SeatResponse;
 import com.paytm.seatreservation.dto.ShowResponse;
 import com.paytm.seatreservation.exception.BadRequestException;
+import com.paytm.seatreservation.exception.ForbiddenException;
 import com.paytm.seatreservation.exception.NotFoundException;
 import com.paytm.seatreservation.model.SeatCounts;
 import com.paytm.seatreservation.model.ShowState;
+import com.paytm.seatreservation.security.AuthenticatedUser;
 import com.paytm.seatreservation.service.ShowService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -36,8 +38,12 @@ public class ShowController {
         this.showService = showService;
     }
 
+    // AuthenticatedUser is declared first so auth is checked (401/403) before the body is parsed (400).
     @PostMapping("/shows")
-    public ResponseEntity<ShowResponse> createShow(@RequestBody CreateShowRequest request) {
+    public ResponseEntity<ShowResponse> createShow(AuthenticatedUser caller, @RequestBody CreateShowRequest request) {
+        if (!caller.isAdmin()) {
+            throw new ForbiddenException("Only an admin can create shows");
+        }
         validate(request);
         ShowState created = showService.createShow(
                 request.name().trim(), request.seats(), request.pricePaise(), request.perUserLimit());

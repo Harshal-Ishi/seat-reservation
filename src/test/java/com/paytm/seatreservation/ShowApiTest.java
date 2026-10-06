@@ -1,27 +1,15 @@
 package com.paytm.seatreservation;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.web.client.TestRestTemplate;
-import org.springframework.http.HttpEntity;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class ShowApiTest extends MySqlIntegrationTest {
-
-    @Autowired
-    private TestRestTemplate rest;
-
-    @Autowired
-    private ObjectMapper json;
 
     @Test
     void createShowReturnsEverySeatAvailable() throws Exception {
@@ -99,9 +87,7 @@ class ShowApiTest extends MySqlIntegrationTest {
     }
 
     private ResponseEntity<String> postShow(String requestBody) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        return rest.postForEntity("/shows", new HttpEntity<>(requestBody, headers), String.class);
+        return post("/shows", requestBody, adminToken());
     }
 
     private void assertCounts(JsonNode body, int available, int held, int confirmed, int total) {

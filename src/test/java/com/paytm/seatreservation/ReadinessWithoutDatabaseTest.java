@@ -20,7 +20,9 @@ import static org.assertj.core.api.Assertions.assertThat;
                 "DB_USERNAME=unused",
                 "DB_PASSWORD=unused",
                 "DB_CONNECTION_TIMEOUT_MS=1000",
-                "spring.flyway.enabled=false"
+                "spring.flyway.enabled=false",
+                "JWT_SECRET=test-jwt-secret-0123456789-0123456789",
+                "ADMIN_SECRET=test-admin-secret"
         })
 class ReadinessWithoutDatabaseTest {
 

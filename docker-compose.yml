@@ -21,6 +21,8 @@ services:
       DB_URL: jdbc:mysql://db:3306/seats?useSSL=false&allowPublicKeyRetrieval=true
       DB_USERNAME: root
       DB_PASSWORD: seats
+      JWT_SECRET: local-dev-jwt-secret-change-me-0123456789
+      ADMIN_SECRET: local-admin-secret
     ports:
       - "8080:8080"
     depends_on:

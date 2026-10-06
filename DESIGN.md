@@ -18,7 +18,7 @@ client ──HTTP──> Spring Boot app (1 instance) ──JDBC──> MySQL 8.
 - Java 21, Spring Boot 3, Maven (with `mvnw` wrapper so a clean clone needs no local Maven).
 - Database access: Spring `JdbcTemplate` + `TransactionTemplate`. No JPA.
 - Libraries: Flyway (migrations), jjwt (JWT), Micrometer Prometheus registry, logstash-logback-encoder (JSON logs). Testcontainers for integration tests.
-- No Spring Security: auth is one servlet filter that verifies the JWT. Less machinery to explain.
+- No Spring Security. A controller method that needs a caller declares an `AuthenticatedUser` parameter. `AuthenticatedUserArgumentResolver` fills it from the `Authorization: Bearer` header via `TokenService.verify`, or throws 401. Endpoints without that parameter are public. Unlike a servlet filter, a failure here goes through the same `GlobalExceptionHandler` as every other error.
 - Virtual threads on (`spring.threads.virtual.enabled=true`): a request waiting for a DB connection parks cheaply instead of holding a platform thread. The DB pool becomes the only throttle. Connector/J 9.x uses `ReentrantLock` rather than `synchronized`, so virtual threads don't get pinned.
 - **Isolation: READ COMMITTED** (set on the Hikari pool). MySQL's default REPEATABLE READ takes gap locks, which cause extra lock waits and deadlocks under a burst. READ COMMITTED locks only the rows actually read with `FOR UPDATE` or written.
 - `rewriteBatchedStatements=true` so the seat batch insert is one multi-row `INSERT`.
@@ -33,9 +33,9 @@ com.paytm.seatreservation
   dto          request/response records
   model        records the DAOs return and the services work with
   exception    domain exceptions + GlobalExceptionHandler
-  security     JwtAuthFilter, AuthenticatedUser
+  security     AuthenticatedUserArgumentResolver, AuthenticatedUser, Role
   observability RequestIdFilter, ReservationMetrics
-  config       app properties, Jackson config
+  config       WebConfig (registers the resolver)
 ```
 
 Controller = HTTP + validation. Service = all business rules and transaction boundaries. DAO = SQL only.
@@ -120,8 +120,10 @@ Test-harness endpoint so a burst can mint tokens for thousands of users.
 → 200 { "token": "<jwt>", "user_id": "u-123", "role": "user", "expires_in": 3600 }
 ```
 
-- JWT is HS256, signed with `JWT_SECRET` (env). `sub` = user id, `role` = `user` or `admin`.
-- `role=admin` only if `admin_secret` equals `ADMIN_SECRET` (env). Wrong secret → 403.
+- JWT is HS256, signed with `JWT_SECRET` (env, at least 32 bytes). `sub` = user id, `role` = `user` or `admin`. Lifetime `TOKEN_TTL_SECONDS` (default 3600).
+- `role=admin` only if `admin_secret` equals `ADMIN_SECRET` (env), compared in constant time. Wrong secret → 403.
+- The app refuses to start if `JWT_SECRET` or `ADMIN_SECRET` is missing, or if `JWT_SECRET` is too short.
+- Expired, tampered or wrongly signed token, or a non-`Bearer` scheme → 401 with `WWW-Authenticate: Bearer`. Auth is checked before the request body is parsed.
 - **Decision**: anyone can mint a user token. This is a stand-in for a real identity provider and is documented as such. It does not weaken requirement 6: identity is still taken only from the token, never from a request body.
 
 | Case | Code |

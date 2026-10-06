@@ -1,6 +1,7 @@
 package com.paytm.seatreservation.exception;
 
 import com.paytm.seatreservation.dto.ErrorResponse;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -19,6 +20,18 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<ErrorResponse> handleUnreadableBody(HttpMessageNotReadableException e) {
         return error(HttpStatus.BAD_REQUEST, "bad-request", "Request body is not valid JSON or has a field of the wrong type");
+    }
+
+    @ExceptionHandler(UnauthorizedException.class)
+    public ResponseEntity<ErrorResponse> handleUnauthorized(UnauthorizedException e) {
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                .header(HttpHeaders.WWW_AUTHENTICATE, "Bearer")
+                .body(new ErrorResponse("unauthorized", e.getMessage()));
+    }
+
+    @ExceptionHandler(ForbiddenException.class)
+    public ResponseEntity<ErrorResponse> handleForbidden(ForbiddenException e) {
+        return error(HttpStatus.FORBIDDEN, "forbidden", e.getMessage());
     }
 
     @ExceptionHandler(NotFoundException.class)

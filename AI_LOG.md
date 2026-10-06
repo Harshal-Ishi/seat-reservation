@@ -48,3 +48,15 @@ Per milestone: what the AI produced, and what I decided or changed.
 - `position` column so seats list in creation order.
 - Counts come from the same query as the seat list, not a separate COUNT, so they always agree.
 - `POST /shows` is open until milestone 4 adds admin auth.
+
+## Milestone 4: JWT auth and token endpoint
+
+**AI produced**
+- `TokenService` (jjwt 0.13, HS256): issue and verify tokens, constant-time admin-secret check, startup fails on missing or short secrets.
+- `AuthenticatedUserArgumentResolver` + `WebConfig`: identity comes only from the bearer token; endpoints opt in by declaring an `AuthenticatedUser` parameter.
+- `POST /auth/token`; `POST /shows` restricted to admin; 401 (with `WWW-Authenticate`) and 403 handlers.
+- Tests: token issuing, wrong admin secret, invalid user ids, no/garbage/forged/expired token, Basic scheme, auth before body parsing, public show state.
+
+**I decided**
+- No Spring Security; argument resolver instead of a servlet filter so auth errors share the normal error handler.
+- Token endpoint is open by design (load test needs many users); documented as a stand-in for an identity provider.
