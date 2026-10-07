@@ -230,6 +230,7 @@ Every response carries `X-Request-Id`.
 0b. Fast path, one plain read, no transaction, no locks (combined with step 0's show lookup)
    SELECT show columns, (SELECT COUNT(*) FROM seats WHERE show_id = ? AND seat_label IN (...) AND status <> 'available')
    FROM shows WHERE id = ?
+   → a requested seat doesn't exist: 400 (seats are never deleted, so this can't change). Stop.
    → taken > 0: look up (user_id, idempotency_key); found → 200 replay or 409 key-reused; else 409 seat-taken. Stop.
 
 BEGIN
@@ -245,9 +246,11 @@ BEGIN
       WHERE show_id = ? AND user_id = ? AND seat_count + :n <= :limit
       → 0 rows: over limit → ROLLBACK, 409 per-user-limit.
 
-3. Lock the seats in a fixed order, one statement per seat, labels sorted in Java
+3. Multi-seat requests only: lock the seats in a fixed order, one statement per seat, labels sorted in Java
    SELECT status FROM seats WHERE show_id = ? AND seat_label = ? FOR UPDATE
-   → no row: unknown label → ROLLBACK, 400.
+   (A single seat has no lock order to get wrong and goes straight to step 4. Under READ COMMITTED, an UPDATE whose
+   WHERE no longer matches neither waits for nor keeps the row lock, so once a hot seat is sold, each loser fails in
+   one round trip instead of queueing on the lock.)
 
 4. Claim the seats (the atomic decision)
    UPDATE seats SET status = 'confirmed', reservation_id = ?

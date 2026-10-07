@@ -34,7 +34,8 @@ public class ShowDao {
     }
 
     /**
-     * The show and, in the same round trip, how many of the requested seats are already taken. Plain read, no lock.
+     * The show and, in the same round trip, how many of the requested seats exist and how many are already taken.
+     * Plain read, no lock.
      * One statement instead of two matters when the database is a network hop away: under a burst, every round trip
      * a request makes is time it holds a pooled connection that other requests are queueing for.
      */
@@ -42,16 +43,20 @@ public class ShowDao {
         // Only "?" placeholders are joined into the SQL; the labels themselves are bound as parameters.
         String placeholders = String.join(", ", Collections.nCopies(seatLabels.size(), "?"));
         List<Object> params = new ArrayList<>(seatLabels.size() + 3);
-        params.add(id.toString());
-        params.addAll(seatLabels);
         params.add(SeatStatus.AVAILABLE.value());
         params.add(id.toString());
+        params.addAll(seatLabels);
+        params.add(id.toString());
         return jdbc.query("""
-                                SELECT id, name, price_paise, per_user_limit, total_seats,
-                                       (SELECT COUNT(*) FROM seats
-                                        WHERE show_id = ? AND seat_label IN (%s) AND status <> ?) AS taken_seats
-                                FROM shows
-                                WHERE id = ?
+                                SELECT sh.id, sh.name, sh.price_paise, sh.per_user_limit, sh.total_seats,
+                                       counts.existing_seats, counts.taken_seats
+                                FROM shows sh
+                                CROSS JOIN (
+                                    SELECT COUNT(*) AS existing_seats, COALESCE(SUM(status <> ?), 0) AS taken_seats
+                                    FROM seats
+                                    WHERE show_id = ? AND seat_label IN (%s)
+                                ) counts
+                                WHERE sh.id = ?
                                 """.formatted(placeholders),
                         (rs, rowNum) -> new ReservePrecheck(
                                 new Show(
@@ -60,6 +65,7 @@ public class ShowDao {
                                         rs.getLong("price_paise"),
                                         rs.getInt("per_user_limit"),
                                         rs.getInt("total_seats")),
+                                rs.getInt("existing_seats"),
                                 rs.getInt("taken_seats")),
                         params.toArray())
                 .stream()

@@ -87,6 +87,10 @@ public class ReservationService {
         ReservePrecheck precheck = showDao.findWithTakenSeats(showId, sortedLabels)
                 .orElseThrow(() -> new NotFoundException("Show not found"));
         Show show = precheck.show();
+        // Seats are never deleted, so a label missing now is missing for good: 400 before any transaction.
+        if (precheck.existingSeats() != sortedLabels.size()) {
+            throw new BadRequestException("One or more requested seats do not exist in this show");
+        }
         // A request bigger than the limit can never succeed. Checked here because the counter row's very first
         // insert (seat_count 0) has no WHERE to stop it.
         if (seatLabels.size() > show.perUserLimit()) {
@@ -133,10 +137,14 @@ public class ReservationService {
                     throw perUserLimitExceeded(show);
                 }
 
-                // Step 3: lock the seats in sorted order.
-                for (String label : sortedLabels) {
-                    if (seatDao.lockSeat(showId, label).isEmpty()) {
-                        throw new BadRequestException("Unknown seat: " + label);
+                // Step 3 (multi-seat only): lock the seats in sorted order, so two requests for overlapping seats
+                // take their locks in the same order and can't deadlock. A single seat has no ordering to get wrong,
+                // so it goes straight to step 4. That matters for a hot seat: under READ COMMITTED, an UPDATE whose
+                // WHERE no longer matches (seat already confirmed) neither waits for nor takes the row lock, so losers
+                // fail in one round trip instead of queueing on the lock behind each other.
+                if (sortedLabels.size() > 1) {
+                    for (String label : sortedLabels) {
+                        seatDao.lockSeat(showId, label);
                     }
                 }
 

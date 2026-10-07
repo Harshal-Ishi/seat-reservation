@@ -175,3 +175,12 @@ Per milestone: what the AI produced, and what I decided or changed.
 
 **I decided**
 - Keep MySQL on Aiven (free, no time limit) rather than moving it onto Railway, which would burn the $5 trial credit faster (the JVM alone uses ~440 MB).
+
+**Second live burst (pool 50, single-statement pre-check)**: 250 req/s (was 150), 803 × 429 (was 2,657), still zero 5xx, invariant held in every mid-burst snapshot; hot seats still had 429s.
+- Cause: every loser that passed the pre-check before the winner committed took the hot seat's row lock with `SELECT ... FOR UPDATE` and held it for ~2 round trips to Bengaluru before rolling back, so 500 losers drained in single file. Also the pool started at 10 connections and opened the rest (TLS) during the storm.
+
+**AI produced**
+- Single-seat requests skip the explicit lock and go straight to the guarded UPDATE: under READ COMMITTED a non-matching UPDATE neither waits for nor keeps the row lock. Multi-seat requests keep sorted locking (deadlock avoidance).
+- Unknown-seat check moved into the pre-check statement (seats are never deleted), so a 0-row UPDATE can only mean "taken".
+- `TransactionRunnerTest` (unit, no DB): the deadlock retry is now rarely reached by integration tests because the fast path turns contended requests away first; this keeps it covered (retry until success, give up after 5, no retry on lock wait timeout).
+- Railway: `DB_POOL_MIN_IDLE=30` so the storm doesn't wait on TLS handshakes (overlap during a redeploy: 30 + 30 < 76).
