@@ -133,3 +133,30 @@ Per milestone: what the AI produced, and what I decided or changed.
 - `idempotent-replay` is counted under declined, as the assignment's metric list names it, even though the HTTP status is 200.
 
 **Verified on the compose stack**: after a 1,200-request storm, `confirmed_total` = 100 = 201s, `declined{seat-taken}` = 900 = 409s, `declined{idempotent-replay}` = 200 = 200s, `seats_available` = API count.
+
+## Milestone 10: Burst script
+
+**AI produced**
+- `burst/Burst.java`: single-file JDK 21 program (no dependencies, `java Burst.java`): waits for readiness (cold start), creates a fresh show, mints tokens, then fires three latch-released phases: hot-seat storm (5 seats × 500 users), stampede with same-key retries and same-key-different-seats, one user × 10 parallel on limit 4. A watcher polls `GET /shows/{id}` during the stampede. Prints the outcome distribution and PASS/FAIL checks; exit code 0/1.
+- `burst.sh <BASE_URL>`: uses a local JDK 21+, otherwise runs the same file in `eclipse-temurin:21-jdk` (rewriting localhost to the host).
+- Checks: zero 5xx, one 201 per hot seat, no seat won twice, one reservation per key, per-user limit (limit test and whole burst), invariant during and after, confirmed seats == 201 seats, metric deltas == observed responses, gauge == API.
+
+**I decided**
+- In-flight cap (`--concurrency`, default 1,000) while still releasing every request at the same instant: one client machine can't usefully hold 20,000 sockets.
+
+**Verified on the compose stack**: 20,000 requests (2,500 storm + 17,490 stampede + 10 limit) → 0 × 5xx, every check PASS, ~2,500 req/s, p99 ~1.4 s. Docker fallback path tested with a fake old `java`.
+
+## Milestone 11: Deploy preparation and tuning
+
+**AI produced**
+- Simulated the free tiers locally by capping the same image (`docker run --cpus/--memory`) and running the full burst:
+  - 0.1 CPU (Render free): startup crashed (TLS handshake to MySQL exceeded the 3s timeout); once fixed, ~2.5 min to start and ~11–20 req/s, 96% of a burst answered 429, hot-seat checks failed.
+  - 1 CPU: hot seats still failed (1,396 × 429): losers queued on the hot seat's row lock while holding pooled connections.
+- Fast path before the transaction (read-then-reject): a plain read of the requested seats; if any is taken, look up the idempotency key (replay / 409) or decline 409 `seat-taken` without locking. The first version read the key first and raced (a retry got 409 instead of 200); the existing `IdempotencyTest` caught it, and reading seats first fixes it.
+- Separate `connectTimeout` (30s) for opening TLS connections; pool wait back to 10s (the 3s value only existed to dodge Render's proxy timeout).
+- `railway.json` (Dockerfile build, readiness health check), keep-alive GitHub Actions workflow for the Aiven database.
+- Result at 1 CPU after tuning: full 20k burst, every check PASS, 1 × 429.
+
+**I decided**
+- Hosting: app on Railway trial + MySQL on Aiven free (both no card). Rejected Render free on the measurements above; rejected MySQL on Railway to keep the $5 trial credit lasting the full 30 days.
+- Accepted the fast path: it never confirms anything, so it can't double-sell, and it is what makes "everyone else 409" hold under a storm.

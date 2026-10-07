@@ -227,6 +227,10 @@ Every response carries `X-Request-Id`.
 0. SELECT show (price, limit)                       → 404 if missing
    validate: seats non-empty, distinct, count <= limit (else 409 per-user-limit)
 
+0b. Fast path, plain reads, no transaction, no locks
+   SELECT COUNT(*) FROM seats WHERE show_id = ? AND seat_label IN (...) AND status <> 'available'
+   → > 0: look up (user_id, idempotency_key); found → 200 replay or 409 key-reused; else 409 seat-taken. Stop.
+
 BEGIN
 1. Claim the idempotency key
    INSERT INTO reservations (...) VALUES (...)
@@ -258,6 +262,8 @@ Why it is race-free:
   - Why two statements and not one upsert: MySQL's `ON DUPLICATE KEY UPDATE` has no `WHERE`. A guarded single upsert needs an `IF()` expression and a driver flag (`useAffectedRows`) to tell "updated" from "unchanged". Two plain statements are easier to read and to explain.
 - **Idempotency.** The unique key makes a second row for the same key impossible. Two concurrent requests with one key: the second `INSERT` waits on the first's uncommitted index entry. If the first commits, the second gets error 1062, reads the committed row, and replays it (200). If the first rolls back (seat taken), the second's insert succeeds and it proceeds as a fresh attempt. Either way at most one reservation exists per key.
   - In MySQL a duplicate-key error does not abort the transaction (unlike Postgres), but we roll back anyway: nothing else has happened yet.
+- **Fast path (0b) is read-then-reject, never read-then-write.** It can only turn a request away; the guarded `UPDATE` in step 4 is still the only place a seat is confirmed. A stale read can only decline a seat released a moment earlier, never sell one twice. Why it exists: without it, the hundreds of losers of a hot seat each hold a DB connection while queueing on the seat's row lock, and time out into 429s. Measured at 1 CPU with a 20k burst: hot-seat storm went from 267 to 475 req/s and 429s from 1,396 to 996; with the 10s pool wait as well, 1 × 429 and every check passing.
+  - Order matters: seats first, then the key, only when the seats are taken. Seat and reservation commit together, so if our own earlier attempt shows as "seat taken", the later key read is guaranteed to find it and replay it. Reading the key first raced (a retry read "no key", then "seat taken", and got 409 instead of 200); an existing concurrency test caught it.
 - **All-or-nothing.** Steps 1–4 are one transaction. Any failure rolls back everything: no reservation, no counter change, no seat changed.
 
 ### Deadlock avoidance
@@ -303,7 +309,7 @@ A 5xx under load usually comes from something running out, not from logic. The p
 | Resource | Default failure | Plan |
 |---|---|---|
 | Request threads | Tomcat pool exhausted → connections queue or time out | Virtual threads: no thread cap. Waiting requests are cheap |
-| DB connections | Hikari timeout throws → 500 | Small pool (`DB_POOL_SIZE`, default 10, under the DB's connection cap). Requests queue for a connection. Timeout (`DB_CONNECTION_TIMEOUT_MS`, default 10s) maps to **429 `overloaded`** |
+| DB connections | Hikari timeout throws → 500 | Small pool (`DB_POOL_SIZE`, default 10, under the DB's connection cap). Requests queue for a connection. Timeout (`DB_CONNECTION_TIMEOUT_MS`, default 10s) maps to **429 `overloaded`**. Opening a *new* connection (TCP + TLS) has its own limit, `DB_CONNECT_TIMEOUT_MS` (30s): on a small CPU share the TLS handshake alone took over 3s and crashed startup |
 | Row-lock waits | InnoDB default `innodb_lock_wait_timeout` is 50s | Transactions are a few short statements, so locks are held for milliseconds. Session `innodb_lock_wait_timeout = 5` (set per connection by Hikari) as a backstop; error 1205 → 429 |
 | Deadlock | Error 1213 → 500 | Retry the transaction up to 5 attempts, then 429 (section 4) |
 | Expected DB errors | Duplicate key / check violation → 500 | Duplicate key on the idempotency key is caught and turned into replay/409. Everything else uses guarded updates checked by row count, not exceptions |
@@ -378,7 +384,11 @@ Concurrency, user count and seat count are flags.
 - JVM flag `-XX:MaxRAMPercentage=75`, so it fits a small free-tier container.
 - **docker-compose.yml**: `mysql:8.4` with a healthcheck, plus the app with `depends_on: condition: service_healthy`. `docker compose up --build` is the one command.
 - All settings come from env vars (`DB_URL` as a JDBC URL, `DB_USERNAME`, `DB_PASSWORD`, `JWT_SECRET`, `ADMIN_SECRET`, `DB_POOL_SIZE`, `DB_CONNECTION_TIMEOUT_MS`, `PORT`), with local values in compose only.
-- Platform choice is deferred to Phase 5. Constraint: **free only, no card**. Free MySQL hosting is scarcer than Postgres. To verify then: a free MySQL 8 tier (e.g. Aiven free plan). Avoid MySQL-compatible engines like TiDB, whose locking behaves differently from InnoDB and would invalidate section 4.
+- **Hosting (free, no card): app on Railway (trial: up to 2 vCPU / 1 GB), MySQL 8 on Aiven (free plan: 1 GB, 76 connections, TLS required).** `railway.json` builds the same Dockerfile and gates traffic on the readiness endpoint. The JDBC URL carries `sslMode=REQUIRED`.
+  - Rejected: Render free (0.1 CPU). Measured with the image capped at 0.1 CPU: ~11–20 req/s, ~2.5 min startup, 96% of a burst answered 429, hot-seat checks failed. At 1 CPU everything passes.
+  - Rejected: MySQL on Railway too. It would use up the $5 trial credit in ~2.5 weeks; Aiven is free without a time limit.
+  - Aiven powers off an idle free database: `.github/workflows/keep-alive.yml` calls readiness (which queries the DB) every 10 minutes.
+  - Risk: the Railway trial ends 30 days after sign-up. Avoid MySQL-compatible engines like TiDB, whose locking differs from InnoDB and would invalidate section 4.
 
 ---
 
@@ -403,4 +413,4 @@ Concurrency, user count and seat count are flags.
 3. **Build tool:** Maven with wrapper.
 4. **Burst script:** single-file Java.
 5. **Database:** MySQL 8.4, chosen for the candidate's familiarity. GUI: MySQL Workbench.
-6. **Deploy platform:** decided in Phase 5, free tiers only.
+6. **Deploy platform:** Railway (app) + Aiven (MySQL), free, no card; see section 8.

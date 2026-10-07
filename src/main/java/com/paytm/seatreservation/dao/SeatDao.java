@@ -84,6 +84,21 @@ public class SeatDao {
                 SeatStatus.AVAILABLE.value(), reservationId.toString());
     }
 
+    /** Plain read, no lock: how many of these seats are already held or confirmed. */
+    public int countTaken(UUID showId, List<String> seatLabels) {
+        String placeholders = String.join(", ", Collections.nCopies(seatLabels.size(), "?"));
+        List<Object> params = new ArrayList<>(seatLabels.size() + 2);
+        params.add(showId.toString());
+        params.addAll(seatLabels);
+        params.add(SeatStatus.AVAILABLE.value());
+        return jdbc.queryForObject("""
+                        SELECT COUNT(*)
+                        FROM seats
+                        WHERE show_id = ? AND seat_label IN (%s) AND status <> ?
+                        """.formatted(placeholders),
+                Integer.class, params.toArray());
+    }
+
     public int countAvailable(UUID showId) {
         return jdbc.queryForObject("""
                         SELECT COUNT(*)

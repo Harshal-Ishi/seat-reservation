@@ -1,0 +1,25 @@
+# Aiven's free MySQL powers off when it sees no activity. Calling the readiness endpoint every 10 minutes keeps it
+# awake, because readiness checks the database, and doubles as an uptime check on the app. Set the repository
+# variable SERVICE_URL (Settings → Secrets and variables → Actions → Variables), e.g. https://<app>.up.railway.app
+name: keep-alive
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    if: ${{ vars.SERVICE_URL != '' }}
+    steps:
+      - name: Call readiness (retries while the app cold-starts)
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 "${{ vars.SERVICE_URL }}/actuator/health/readiness" || true)
+            echo "attempt $attempt: HTTP $status"
+            if [ "$status" = "200" ]; then exit 0; fi
+            sleep 30
+          done
+          echo "Service did not report ready" >&2
+          exit 1

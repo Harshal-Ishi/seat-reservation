@@ -26,6 +26,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -100,6 +101,22 @@ public class ReservationService {
                 ReservationStatus.CONFIRMED,
                 idempotencyKey,
                 requestHash);
+
+        // Fast path: plain reads, no transaction, no locks. They only ever turn a request away early; they never
+        // reserve anything (read-then-reject, not read-then-write). Without them, the hundreds of losers of a hot
+        // seat would each hold a DB connection while queueing on that seat's row lock, and time out into 429s.
+        // A stale read here can only decline a seat that was released a moment ago, never sell one twice: the
+        // locked transaction below is still the only place a seat is confirmed.
+        if (seatDao.countTaken(showId, sortedLabels) > 0) {
+            // Seats taken, but maybe by this very request's earlier attempt: a retry must get its reservation back,
+            // not a 409. Seat and reservation commit in one transaction, so if the seat read above saw our seat
+            // taken, this later read is guaranteed to see our reservation. (Reading the key first would race.)
+            Optional<Reservation> existing = reservationDao.findByUserAndIdempotencyKey(userId, idempotencyKey);
+            if (existing.isPresent()) {
+                return replayOrReject(existing.get(), requestHash);
+            }
+            throw new ConflictException(DeclineReason.SEAT_TAKEN, "One or more requested seats are not available");
+        }
 
         try {
             // Any exception thrown inside rolls the whole transaction back: no reservation row, no seat changed.
@@ -188,6 +205,11 @@ public class ReservationService {
     private ReserveResult replayExisting(String userId, String idempotencyKey, String requestHash) {
         Reservation existing = reservationDao.findByUserAndIdempotencyKey(userId, idempotencyKey)
                 .orElseThrow(() -> new IllegalStateException("Duplicate idempotency key but no reservation found"));
+        return replayOrReject(existing, requestHash);
+    }
+
+    /** Same request on a used key → the original reservation (200); a different request → 409. */
+    private ReserveResult replayOrReject(Reservation existing, String requestHash) {
         if (!existing.requestHash().equals(requestHash)) {
             throw new ConflictException(DeclineReason.IDEMPOTENCY_KEY_REUSED,
                     "This idempotency key was already used for a different request");
