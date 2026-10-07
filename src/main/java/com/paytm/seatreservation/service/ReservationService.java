@@ -12,6 +12,7 @@ import com.paytm.seatreservation.model.CancelResult;
 import com.paytm.seatreservation.model.DeclineReason;
 import com.paytm.seatreservation.model.Reservation;
 import com.paytm.seatreservation.model.ReservationStatus;
+import com.paytm.seatreservation.model.ReservePrecheck;
 import com.paytm.seatreservation.model.ReserveResult;
 import com.paytm.seatreservation.model.Show;
 import com.paytm.seatreservation.observability.ReservationMetrics;
@@ -80,17 +81,18 @@ public class ReservationService {
     }
 
     private ReserveResult attemptReserve(UUID showId, String userId, List<String> seatLabels, String idempotencyKey) {
-        Show show = showDao.findById(showId)
+        // Sorted once and used for locking, hashing and the response. Java's String order matches the
+        // ascii_bin collation of seat_label, so every transaction locks overlapping seats in the same order.
+        List<String> sortedLabels = seatLabels.stream().sorted().toList();
+        ReservePrecheck precheck = showDao.findWithTakenSeats(showId, sortedLabels)
                 .orElseThrow(() -> new NotFoundException("Show not found"));
+        Show show = precheck.show();
         // A request bigger than the limit can never succeed. Checked here because the counter row's very first
         // insert (seat_count 0) has no WHERE to stop it.
         if (seatLabels.size() > show.perUserLimit()) {
             throw perUserLimitExceeded(show);
         }
 
-        // Sorted once and used for locking, hashing and the response. Java's String order matches the
-        // ascii_bin collation of seat_label, so every transaction locks overlapping seats in the same order.
-        List<String> sortedLabels = seatLabels.stream().sorted().toList();
         String requestHash = requestHash(showId, sortedLabels);
         Reservation reservation = new Reservation(
                 UUID.randomUUID(),
@@ -102,12 +104,12 @@ public class ReservationService {
                 idempotencyKey,
                 requestHash);
 
-        // Fast path: plain reads, no transaction, no locks. They only ever turn a request away early; they never
-        // reserve anything (read-then-reject, not read-then-write). Without them, the hundreds of losers of a hot
+        // Fast path: the plain read above (no transaction, no locks). It only ever turns a request away early; it never
+        // reserves anything (read-then-reject, not read-then-write). Without it, the hundreds of losers of a hot
         // seat would each hold a DB connection while queueing on that seat's row lock, and time out into 429s.
         // A stale read here can only decline a seat that was released a moment ago, never sell one twice: the
         // locked transaction below is still the only place a seat is confirmed.
-        if (seatDao.countTaken(showId, sortedLabels) > 0) {
+        if (precheck.takenSeats() > 0) {
             // Seats taken, but maybe by this very request's earlier attempt: a retry must get its reservation back,
             // not a 409. Seat and reservation commit in one transaction, so if the seat read above saw our seat
             // taken, this later read is guaranteed to see our reservation. (Reading the key first would race.)

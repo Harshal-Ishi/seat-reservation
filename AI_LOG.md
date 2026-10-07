@@ -160,3 +160,18 @@ Per milestone: what the AI produced, and what I decided or changed.
 **I decided**
 - Hosting: app on Railway trial + MySQL on Aiven free (both no card). Rejected Render free on the measurements above; rejected MySQL on Railway to keep the $5 trial credit lasting the full 30 days.
 - Accepted the fast path: it never confirms anything, so it can't double-sell, and it is what makes "everyone else 409" hold under a storm.
+
+## Milestone 11: Live deploy and tuning
+
+**Deployed**: Railway (Southeast Asia) + Aiven MySQL free (DigitalOcean Bengaluru), TLS. Liveness/readiness 200, metrics exposed.
+
+**First live burst (20k)**: zero 5xx, no seat sold twice, idempotency and limit held, metrics reconciled exactly, but ~150 req/s and 2,657 × 429 (some on hot seats).
+- Diagnosed from the service's own metrics (`hikaricp_connections_usage_seconds`, `http_server_requests_seconds`): ~208 ms of connection time per request, ~2.7 pool borrows per request → latency-bound by the Singapore↔Bengaluru hop, not CPU (process CPU idle, 2 CPUs).
+- The burst script's "invariant violations" were mid-burst `GET /shows` polls that got 429 (no counts in the body); the watcher now skips non-200 snapshots.
+
+**AI produced**
+- One statement for the show lookup + seat pre-check (`ShowDao.findWithTakenSeats`); losers now make a single round trip.
+- `minimum-idle` (default 10) so the pool can be raised to 50 without a redeploy exceeding Aiven's 76 connections.
+
+**I decided**
+- Keep MySQL on Aiven (free, no time limit) rather than moving it onto Railway, which would burn the $5 trial credit faster (the JVM alone uses ~440 MB).

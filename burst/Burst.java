@@ -548,8 +548,14 @@ class InvariantWatcher {
         thread = Thread.ofVirtual().start(() -> {
             while (running.get()) {
                 try {
-                    String body = http.send(HttpRequest.newBuilder(URI.create(baseUrl + "/shows/" + showId)).GET().build(),
-                            HttpResponse.BodyHandlers.ofString()).body();
+                    HttpResponse<String> response = http.send(HttpRequest.newBuilder(URI.create(baseUrl + "/shows/" + showId)).GET().build(),
+                            HttpResponse.BodyHandlers.ofString());
+                    if (response.statusCode() != 200) {
+                        // e.g. 429 under load: no counts to check, so not a violation either way.
+                        Thread.sleep(200);
+                        continue;
+                    }
+                    String body = response.body();
                     int[] c = new int[4];
                     String[] names = {"available", "held", "confirmed", "total"};
                     for (int i = 0; i < 4; i++) {

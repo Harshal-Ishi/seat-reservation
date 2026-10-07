@@ -227,9 +227,10 @@ Every response carries `X-Request-Id`.
 0. SELECT show (price, limit)                       → 404 if missing
    validate: seats non-empty, distinct, count <= limit (else 409 per-user-limit)
 
-0b. Fast path, plain reads, no transaction, no locks
-   SELECT COUNT(*) FROM seats WHERE show_id = ? AND seat_label IN (...) AND status <> 'available'
-   → > 0: look up (user_id, idempotency_key); found → 200 replay or 409 key-reused; else 409 seat-taken. Stop.
+0b. Fast path, one plain read, no transaction, no locks (combined with step 0's show lookup)
+   SELECT show columns, (SELECT COUNT(*) FROM seats WHERE show_id = ? AND seat_label IN (...) AND status <> 'available')
+   FROM shows WHERE id = ?
+   → taken > 0: look up (user_id, idempotency_key); found → 200 replay or 409 key-reused; else 409 seat-taken. Stop.
 
 BEGIN
 1. Claim the idempotency key
@@ -388,6 +389,7 @@ Concurrency, user count and seat count are flags.
   - Rejected: Render free (0.1 CPU). Measured with the image capped at 0.1 CPU: ~11–20 req/s, ~2.5 min startup, 96% of a burst answered 429, hot-seat checks failed. At 1 CPU everything passes.
   - Rejected: MySQL on Railway too. It would use up the $5 trial credit in ~2.5 weeks; Aiven is free without a time limit.
   - Aiven powers off an idle free database: `.github/workflows/keep-alive.yml` calls readiness (which queries the DB) every 10 minutes.
+  - Measured live (Railway Singapore ↔ Aiven DigitalOcean Bengaluru): each request held a pooled connection ~208 ms on average because every statement is a network round trip, so 30 connections gave ~144 req/s and a 20k burst produced 2,657 × 429 (zero 5xx, no double-sell). Fixes: show lookup and seat pre-check merged into one statement (losers now make one round trip), pool 50 with a 10-connection idle floor so a redeploy's overlap stays under Aiven's 76.
   - Risk: the Railway trial ends 30 days after sign-up. Avoid MySQL-compatible engines like TiDB, whose locking differs from InnoDB and would invalidate section 4.
 
 ---

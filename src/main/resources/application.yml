@@ -12,6 +12,9 @@ spring:
     password: ${DB_PASSWORD}
     hikari:
       maximum-pool-size: ${DB_POOL_SIZE:10}
+      # Connections kept open when idle; the pool grows to maximum-pool-size under load. A small floor means a
+      # redeploy (old and new instance briefly running together) doesn't need 2 × the maximum from the database.
+      minimum-idle: ${DB_POOL_MIN_IDLE:10}
       # Fail fast instead of the 30s default: a request waiting this long is better declined (429)
       # than left hanging, and readiness reports DB-down quickly.
       connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:10000}
