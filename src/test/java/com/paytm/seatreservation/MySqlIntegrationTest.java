@@ -3,6 +3,7 @@ package com.paytm.seatreservation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.http.HttpEntity;
@@ -37,6 +38,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * pointing at it.
  */
 @Testcontainers(disabledWithoutDocker = true)
+// Spring Boot tests turn metrics export off by default; this keeps /actuator/prometheus as it is in production.
+@AutoConfigureObservability
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {

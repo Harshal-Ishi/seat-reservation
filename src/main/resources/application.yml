@@ -34,11 +34,17 @@ server:
   # Hosting platforms inject PORT.
   port: ${PORT:8080}
 
+logging:
+  structured:
+    format:
+      # One JSON object per line (Logstash layout), including MDC fields such as request_id and user_id.
+      console: logstash
+
 management:
   endpoints:
     web:
       exposure:
-        include: health
+        include: health,prometheus
   endpoint:
     health:
       probes:

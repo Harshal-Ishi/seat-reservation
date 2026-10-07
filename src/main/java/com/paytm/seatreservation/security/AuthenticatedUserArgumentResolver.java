@@ -1,6 +1,8 @@
 package com.paytm.seatreservation.security;
 
 import com.paytm.seatreservation.exception.UnauthorizedException;
+import com.paytm.seatreservation.observability.RequestIdFilter;
+import org.slf4j.MDC;
 import com.paytm.seatreservation.service.TokenService;
 import org.springframework.core.MethodParameter;
 import org.springframework.http.HttpHeaders;
@@ -40,6 +42,9 @@ public class AuthenticatedUserArgumentResolver implements HandlerMethodArgumentR
         if (header == null || !header.startsWith(BEARER_PREFIX)) {
             throw new UnauthorizedException("Missing bearer token");
         }
-        return tokenService.verify(header.substring(BEARER_PREFIX.length()).trim());
+        AuthenticatedUser user = tokenService.verify(header.substring(BEARER_PREFIX.length()).trim());
+        // From here on, every log line of this request carries the verified user id.
+        MDC.put(RequestIdFilter.MDC_USER_ID, user.userId());
+        return user;
     }
 }

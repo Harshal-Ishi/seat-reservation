@@ -8,13 +8,18 @@ import com.paytm.seatreservation.exception.BadRequestException;
 import com.paytm.seatreservation.exception.ConflictException;
 import com.paytm.seatreservation.exception.ForbiddenException;
 import com.paytm.seatreservation.exception.NotFoundException;
+import com.paytm.seatreservation.model.CancelResult;
 import com.paytm.seatreservation.model.DeclineReason;
 import com.paytm.seatreservation.model.Reservation;
 import com.paytm.seatreservation.model.ReservationStatus;
 import com.paytm.seatreservation.model.ReserveResult;
 import com.paytm.seatreservation.model.Show;
+import com.paytm.seatreservation.observability.ReservationMetrics;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.PessimisticLockingFailureException;
+import org.springframework.jdbc.CannotGetJdbcConnectionException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.CannotCreateTransactionException;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -31,24 +36,49 @@ public class ReservationService {
     private final ReservationDao reservationDao;
     private final UserSeatCountDao userSeatCountDao;
     private final TransactionRunner transactionRunner;
+    private final ReservationMetrics metrics;
 
     public ReservationService(ShowDao showDao,
                               SeatDao seatDao,
                               ReservationDao reservationDao,
                               UserSeatCountDao userSeatCountDao,
-                              TransactionRunner transactionRunner) {
+                              TransactionRunner transactionRunner,
+                              ReservationMetrics metrics) {
         this.showDao = showDao;
         this.seatDao = seatDao;
         this.reservationDao = reservationDao;
         this.userSeatCountDao = userSeatCountDao;
         this.transactionRunner = transactionRunner;
+        this.metrics = metrics;
     }
 
     /**
      * Reserves all requested seats for the user, or none of them (all-or-nothing), at most once per idempotency key.
-     * The seat labels must already be distinct and well-formed.
+     * The seat labels must already be distinct and well-formed. Every outcome is recorded once the transaction is over.
      */
     public ReserveResult reserve(UUID showId, String userId, List<String> seatLabels, String idempotencyKey) {
+        long startNanos = System.nanoTime();
+        int seatCount = seatLabels.size();
+        try {
+            ReserveResult result = attemptReserve(showId, userId, seatLabels, idempotencyKey);
+            UUID reservationId = result.reservation().id();
+            if (result.replayed()) {
+                metrics.declined(DeclineReason.IDEMPOTENT_REPLAY, showId, reservationId, seatCount, elapsedMillis(startNanos));
+            } else {
+                metrics.confirmed(showId, reservationId, seatCount, elapsedMillis(startNanos));
+            }
+            return result;
+        } catch (ConflictException e) {
+            metrics.declined(e.reason(), showId, null, seatCount, elapsedMillis(startNanos));
+            throw e;
+        } catch (CannotCreateTransactionException | CannotGetJdbcConnectionException | PessimisticLockingFailureException e) {
+            // Mapped to 429 by GlobalExceptionHandler; counted here so the metric knows it was a reserve.
+            metrics.declined(DeclineReason.OVERLOADED, showId, null, seatCount, elapsedMillis(startNanos));
+            throw e;
+        }
+    }
+
+    private ReserveResult attemptReserve(UUID showId, String userId, List<String> seatLabels, String idempotencyKey) {
         Show show = showDao.findById(showId)
                 .orElseThrow(() -> new NotFoundException("Show not found"));
         // A request bigger than the limit can never succeed. Checked here because the counter row's very first
@@ -109,6 +139,15 @@ public class ReservationService {
      * Locks are taken in the same order as reserve (reservation → counter → sorted seats), so the two can't deadlock.
      */
     public Reservation cancel(UUID reservationId, String userId) {
+        CancelResult result = attemptCancel(reservationId, userId);
+        Reservation reservation = result.reservation();
+        if (result.changed()) {
+            metrics.cancelled(reservation.showId(), reservation.id(), reservation.seats().size());
+        }
+        return reservation;
+    }
+
+    private CancelResult attemptCancel(UUID reservationId, String userId) {
         return transactionRunner.runWithDeadlockRetry(() -> {
             // Locking the row first means the owner and status checks below can't go stale before we write.
             Reservation reservation = reservationDao.findByIdForUpdate(reservationId)
@@ -117,7 +156,7 @@ public class ReservationService {
                 throw new ForbiddenException("Only the owner can cancel this reservation");
             }
             if (reservation.status() == ReservationStatus.CANCELLED) {
-                return reservation;
+                return new CancelResult(reservation, false);
             }
 
             int seatCount = reservation.seats().size();
@@ -133,7 +172,7 @@ public class ReservationService {
             if (released != seatCount) {
                 throw new IllegalStateException("Reservation " + reservationId + " held " + released + " seats, expected " + seatCount);
             }
-            return withStatus(reservation, ReservationStatus.CANCELLED);
+            return new CancelResult(withStatus(reservation, ReservationStatus.CANCELLED), true);
         });
     }
 
@@ -154,6 +193,10 @@ public class ReservationService {
                     "This idempotency key was already used for a different request");
         }
         return new ReserveResult(existing, true);
+    }
+
+    private long elapsedMillis(long startNanos) {
+        return (System.nanoTime() - startNanos) / 1_000_000;
     }
 
     private ConflictException perUserLimitExceeded(Show show) {

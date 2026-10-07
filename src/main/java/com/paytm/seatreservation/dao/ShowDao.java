@@ -4,6 +4,7 @@ import com.paytm.seatreservation.model.Show;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -22,6 +23,10 @@ public class ShowDao {
                         VALUES (?, ?, ?, ?, ?)
                         """,
                 show.id().toString(), show.name(), show.pricePaise(), show.perUserLimit(), show.totalSeats());
+    }
+
+    public List<UUID> findAllIds() {
+        return jdbc.query("SELECT id FROM shows", (rs, rowNum) -> UUID.fromString(rs.getString("id")));
     }
 
     public Optional<Show> findById(UUID id) {

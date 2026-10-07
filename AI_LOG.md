@@ -117,3 +117,19 @@ Per milestone: what the AI produced, and what I decided or changed.
 - Cancel is idempotent: cancelling an already-cancelled reservation returns 200 with it, so client retries are safe.
 
 **Verified on the compose stack**: 684 concurrent cancels/reserves (100 owners cancelling, some twice; 500 buyers storming the released seats; 50 strangers trying to cancel others' reservations) → 134 × 200, 50 × 403, 93 × 201 (no seat won twice), 407 × 409, zero 5xx, invariant holds, every counter matches seats held.
+
+## Milestone 9: Metrics and structured logs
+
+**AI produced**
+- `micrometer-registry-prometheus`; `/actuator/prometheus` exposed.
+- `ReservationMetrics`: `reservations_confirmed_total`, `reservations_declined_total{reason}` (all reasons pre-registered at 0), `reservations_cancelled_total`, `seats_available{show_id}` (reads the DB on each scrape; registered on show creation and for existing shows at startup). Each outcome writes its counter and one structured log line from the same call.
+- Service records outcomes after the transaction: confirmed, replay (`idempotent-replay`), 409 reasons, overload (`overloaded`); cancel counted only when it actually changed something.
+- `RequestIdFilter`: `X-Request-Id` in/out (validated, else a new UUID), `request_id` + `user_id` in MDC, `request_id` in error bodies.
+- JSON logs via Spring Boot's built-in Logstash structured format.
+- Tests (7): endpoint and metric names, exact counter deltas per outcome, gauge equals API, request id generated / kept / replaced, the outcome log line is JSON with request and user ids and no token.
+
+**I decided**
+- Spring Boot's built-in structured logging instead of adding logstash-logback-encoder (same output, one dependency fewer).
+- `idempotent-replay` is counted under declined, as the assignment's metric list names it, even though the HTTP status is 200.
+
+**Verified on the compose stack**: after a 1,200-request storm, `confirmed_total` = 100 = 201s, `declined{seat-taken}` = 900 = 409s, `declined{idempotent-replay}` = 200 = 200s, `seats_available` = API count.

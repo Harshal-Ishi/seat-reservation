@@ -2,8 +2,10 @@ package com.paytm.seatreservation.exception;
 
 import com.paytm.seatreservation.dto.ErrorResponse;
 import com.paytm.seatreservation.model.DeclineReason;
+import com.paytm.seatreservation.observability.RequestIdFilter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -35,7 +37,7 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleUnauthorized(UnauthorizedException e) {
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                 .header(HttpHeaders.WWW_AUTHENTICATE, "Bearer")
-                .body(new ErrorResponse("unauthorized", e.getMessage()));
+                .body(errorBody("unauthorized", e.getMessage()));
     }
 
     @ExceptionHandler(ForbiddenException.class)
@@ -68,10 +70,14 @@ public class GlobalExceptionHandler {
         log.warn("Declined as overloaded: {}", e.getMessage());
         return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
                 .header(HttpHeaders.RETRY_AFTER, RETRY_AFTER_SECONDS)
-                .body(new ErrorResponse(DeclineReason.OVERLOADED.value(), "Too many requests right now; retry shortly"));
+                .body(errorBody(DeclineReason.OVERLOADED.value(), "Too many requests right now; retry shortly"));
     }
 
     private ResponseEntity<ErrorResponse> error(HttpStatus status, String error, String message) {
-        return ResponseEntity.status(status).body(new ErrorResponse(error, message));
+        return ResponseEntity.status(status).body(errorBody(error, message));
+    }
+
+    private ErrorResponse errorBody(String error, String message) {
+        return new ErrorResponse(error, message, MDC.get(RequestIdFilter.MDC_REQUEST_ID));
     }
 }

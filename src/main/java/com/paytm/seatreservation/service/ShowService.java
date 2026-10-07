@@ -8,6 +8,7 @@ import com.paytm.seatreservation.model.SeatCounts;
 import com.paytm.seatreservation.model.SeatStatus;
 import com.paytm.seatreservation.model.Show;
 import com.paytm.seatreservation.model.ShowState;
+import com.paytm.seatreservation.observability.ReservationMetrics;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -22,11 +23,13 @@ public class ShowService {
     private final ShowDao showDao;
     private final SeatDao seatDao;
     private final TransactionTemplate transactionTemplate;
+    private final ReservationMetrics metrics;
 
-    public ShowService(ShowDao showDao, SeatDao seatDao, TransactionTemplate transactionTemplate) {
+    public ShowService(ShowDao showDao, SeatDao seatDao, TransactionTemplate transactionTemplate, ReservationMetrics metrics) {
         this.showDao = showDao;
         this.seatDao = seatDao;
         this.transactionTemplate = transactionTemplate;
+        this.metrics = metrics;
     }
 
     public ShowState createShow(String name, List<String> seatLabels, long pricePaise, Integer perUserLimit) {
@@ -38,6 +41,7 @@ public class ShowService {
             showDao.insert(show);
             seatDao.insertAvailable(show.id(), seatLabels);
         });
+        metrics.registerShow(show.id());
 
         List<Seat> seats = seatLabels.stream()
                 .map(label -> new Seat(label, SeatStatus.AVAILABLE))

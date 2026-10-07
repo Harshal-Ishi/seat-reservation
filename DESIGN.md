@@ -17,7 +17,7 @@ client ──HTTP──> Spring Boot app (1 instance) ──JDBC──> MySQL 8.
 
 - Java 21, Spring Boot 3, Maven (with `mvnw` wrapper so a clean clone needs no local Maven).
 - Database access: Spring `JdbcTemplate` + `TransactionTemplate`. No JPA.
-- Libraries: Flyway (migrations), jjwt (JWT), Micrometer Prometheus registry, logstash-logback-encoder (JSON logs). Testcontainers for integration tests.
+- Libraries: Flyway (migrations), jjwt (JWT), Micrometer Prometheus registry. JSON logs use Spring Boot's built-in structured logging (`logging.structured.format.console: logstash`), so no extra logging library. Testcontainers for integration tests.
 - No Spring Security. A controller method that needs a caller declares an `AuthenticatedUser` parameter. `AuthenticatedUserArgumentResolver` fills it from the `Authorization: Bearer` header via `TokenService.verify`, or throws 401. Endpoints without that parameter are public. Unlike a servlet filter, a failure here goes through the same `GlobalExceptionHandler` as every other error.
 - Virtual threads on (`spring.threads.virtual.enabled=true`): a request waiting for a DB connection parks cheaply instead of holding a platform thread. The DB pool becomes the only throttle. Connector/J 9.x uses `ReentrantLock` rather than `synchronized`, so virtual threads don't get pinned.
 - **Isolation: READ COMMITTED** (set on the Hikari pool). MySQL's default REPEATABLE READ takes gap locks, which cause extra lock waits and deadlocks under a burst. READ COMMITTED locks only the rows actually read with `FOR UPDATE` or written.
@@ -335,9 +335,10 @@ Counters are incremented **after** commit, so a rolled-back attempt is never cou
 
 ### Logs
 
-- JSON to stdout (logstash encoder).
+- JSON to stdout, one object per line, via Spring Boot's built-in structured logging in Logstash format.
 - `RequestIdFilter`: takes incoming `X-Request-Id` or generates a UUID. Puts it in MDC as `request_id` and echoes it in the response header. `user_id` is added to MDC after auth.
-- One INFO line per reserve or cancel outcome: `show_id`, `reservation_id`, `outcome`, `reason`, `seat_count`, `duration_ms`.
+- One INFO line per reserve or cancel outcome: `event`, `outcome`, `reason`, `show_id`, `reservation_id`, `seat_count`, `duration_ms`. The line is written by the same `ReservationMetrics` call that increments the counter, so logs and metrics always agree.
+- Error bodies carry `request_id`, matching the `X-Request-Id` header and the request's log lines.
 - Never logged: tokens, secrets.
 
 ### Health

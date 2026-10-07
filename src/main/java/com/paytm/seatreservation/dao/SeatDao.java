@@ -84,6 +84,15 @@ public class SeatDao {
                 SeatStatus.AVAILABLE.value(), reservationId.toString());
     }
 
+    public int countAvailable(UUID showId) {
+        return jdbc.queryForObject("""
+                        SELECT COUNT(*)
+                        FROM seats
+                        WHERE show_id = ? AND status = ?
+                        """,
+                Integer.class, showId.toString(), SeatStatus.AVAILABLE.value());
+    }
+
     public List<Seat> findByShowId(UUID showId) {
         return jdbc.query("""
                         SELECT seat_label, status
