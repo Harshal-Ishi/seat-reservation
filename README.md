@@ -19,6 +19,7 @@ Java 21 · Spring Boot 3.5 · MySQL 8.4 (InnoDB) · plain JDBC (`JdbcTemplate`) 
 | Readiness (checks the database, fails closed) | [`/actuator/health/readiness`](https://seat-reservation-production-b408.up.railway.app/actuator/health/readiness) |
 | Prometheus metrics | [`/actuator/prometheus`](https://seat-reservation-production-b408.up.railway.app/actuator/prometheus) |
 | Admin secret (needed to create shows) | `ee604549ef0223cda68ba9875ca0a38e` |
+| Live logs during a burst (screen recording) | [Google Drive](https://drive.google.com/file/d/1dmNx2Fx_7Pgz0AM4Sbrp8966EhI9Fp1F/view?usp=sharing) |
 
 Hosting is free tier: the app on Railway (Southeast Asia), MySQL on Aiven (DigitalOcean, Bengaluru), connected over TLS. Every database statement crosses that network hop, which sets the throughput ceiling; see [Results](#burst-results-against-the-live-url).
 
@@ -186,7 +187,7 @@ Full reasoning in [DESIGN.md §4](DESIGN.md#4-concurrency-design-mysql--innodb) 
 
 **Logs** are JSON, one object per line, with `request_id` (from or echoed in `X-Request-Id`) and `user_id` on every line of a request, plus one line per reserve or cancel outcome with `outcome`, `reason`, `show_id`, `reservation_id`, `seat_count` and `duration_ms`. Tokens and secrets are never logged.
 
-Railway does not offer public log access, so here is a screen recording of the live logs during a burst: **TODO: add recording link**.
+Railway does not offer public log access, so here is a screen recording of the live logs streaming during a burst against the live URL: **[live logs under load (Google Drive)](https://drive.google.com/file/d/1dmNx2Fx_7Pgz0AM4Sbrp8966EhI9Fp1F/view?usp=sharing)**.
 
 **Health:** liveness never touches the database; readiness includes a database check and returns 503 when the database is unreachable. Railway only routes traffic to a deployment once readiness passes.
 
