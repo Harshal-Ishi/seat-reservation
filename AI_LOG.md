@@ -184,3 +184,9 @@ Per milestone: what the AI produced, and what I decided or changed.
 - Unknown-seat check moved into the pre-check statement (seats are never deleted), so a 0-row UPDATE can only mean "taken".
 - `TransactionRunnerTest` (unit, no DB): the deadlock retry is now rarely reached by integration tests because the fast path turns contended requests away first; this keeps it covered (retry until success, give up after 5, no retry on lock wait timeout).
 - Railway: `DB_POOL_MIN_IDLE=30` so the storm doesn't wait on TLS handshakes (overlap during a redeploy: 30 + 30 < 76).
+
+**Third live burst (single-seat requests skip the explicit lock, 30 idle connections)**: 265 req/s, 264 × 429 (was 803), 2 of 5 hot seats fully clean, zero 5xx, every correctness and reconciliation check passed.
+- Live metrics: ~1.98 pool borrows per reserve at ~94 ms each (one Singapore↔Bengaluru round trip): losers still did a second read to look up their idempotency key.
+
+**AI produced**
+- The pre-check is now one statement for show + seat counts + this user's reservation for this key (`ReservationDao.precheck`, LEFT JOIN). One round trip per loser, and race-free because one SELECT is one snapshot. Replaces `ShowDao.findWithTakenSeats`.

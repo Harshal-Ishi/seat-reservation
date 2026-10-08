@@ -227,11 +227,16 @@ Every response carries `X-Request-Id`.
 0. SELECT show (price, limit)                       → 404 if missing
    validate: seats non-empty, distinct, count <= limit (else 409 per-user-limit)
 
-0b. Fast path, one plain read, no transaction, no locks (combined with step 0's show lookup)
-   SELECT show columns, (SELECT COUNT(*) FROM seats WHERE show_id = ? AND seat_label IN (...) AND status <> 'available')
-   FROM shows WHERE id = ?
+0b. Fast path: one plain read, no transaction, no locks (also replaces step 0's show lookup)
+   SELECT show columns,
+          (COUNT of requested seats, COUNT of those not 'available'),
+          this user's reservation for this idempotency key (LEFT JOIN reservations)
+   FROM shows ... WHERE id = ?
+   → no show: 404.
+   → key already used: same request → 200 with the original reservation; different request → 409 key-reused. Stop.
    → a requested seat doesn't exist: 400 (seats are never deleted, so this can't change). Stop.
-   → taken > 0: look up (user_id, idempotency_key); found → 200 replay or 409 key-reused; else 409 seat-taken. Stop.
+   → more seats than the limit: 409 per-user-limit. Stop.
+   → any requested seat taken: 409 seat-taken. Stop.
 
 BEGIN
 1. Claim the idempotency key
@@ -267,7 +272,7 @@ Why it is race-free:
 - **Idempotency.** The unique key makes a second row for the same key impossible. Two concurrent requests with one key: the second `INSERT` waits on the first's uncommitted index entry. If the first commits, the second gets error 1062, reads the committed row, and replays it (200). If the first rolls back (seat taken), the second's insert succeeds and it proceeds as a fresh attempt. Either way at most one reservation exists per key.
   - In MySQL a duplicate-key error does not abort the transaction (unlike Postgres), but we roll back anyway: nothing else has happened yet.
 - **Fast path (0b) is read-then-reject, never read-then-write.** It can only turn a request away; the guarded `UPDATE` in step 4 is still the only place a seat is confirmed. A stale read can only decline a seat released a moment earlier, never sell one twice. Why it exists: without it, the hundreds of losers of a hot seat each hold a DB connection while queueing on the seat's row lock, and time out into 429s. Measured at 1 CPU with a 20k burst: hot-seat storm went from 267 to 475 req/s and 429s from 1,396 to 996; with the 10s pool wait as well, 1 × 429 and every check passing.
-  - Order matters: seats first, then the key, only when the seats are taken. Seat and reservation commit together, so if our own earlier attempt shows as "seat taken", the later key read is guaranteed to find it and replay it. Reading the key first raced (a retry read "no key", then "seat taken", and got 409 instead of 200); an existing concurrency test caught it.
+  - It is one statement on purpose. Under READ COMMITTED a single SELECT reads one consistent snapshot, and a seat and its reservation commit in the same transaction, so if the snapshot shows our own earlier attempt's seat as taken, it also shows that reservation, and the retry gets 200. Two separate reads raced: an earlier version read the key, then the seats, and a retry saw "no key" then "seat taken" and got 409; an existing concurrency test caught it.
 - **All-or-nothing.** Steps 1–4 are one transaction. Any failure rolls back everything: no reservation, no counter change, no seat changed.
 
 ### Deadlock avoidance

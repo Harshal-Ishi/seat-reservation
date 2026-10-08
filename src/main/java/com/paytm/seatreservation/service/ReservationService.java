@@ -2,7 +2,6 @@ package com.paytm.seatreservation.service;
 
 import com.paytm.seatreservation.dao.ReservationDao;
 import com.paytm.seatreservation.dao.SeatDao;
-import com.paytm.seatreservation.dao.ShowDao;
 import com.paytm.seatreservation.dao.UserSeatCountDao;
 import com.paytm.seatreservation.exception.BadRequestException;
 import com.paytm.seatreservation.exception.ConflictException;
@@ -27,26 +26,22 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.List;
-import java.util.Optional;
 import java.util.UUID;
 
 @Service
 public class ReservationService {
 
-    private final ShowDao showDao;
     private final SeatDao seatDao;
     private final ReservationDao reservationDao;
     private final UserSeatCountDao userSeatCountDao;
     private final TransactionRunner transactionRunner;
     private final ReservationMetrics metrics;
 
-    public ReservationService(ShowDao showDao,
-                              SeatDao seatDao,
+    public ReservationService(SeatDao seatDao,
                               ReservationDao reservationDao,
                               UserSeatCountDao userSeatCountDao,
                               TransactionRunner transactionRunner,
                               ReservationMetrics metrics) {
-        this.showDao = showDao;
         this.seatDao = seatDao;
         this.reservationDao = reservationDao;
         this.userSeatCountDao = userSeatCountDao;
@@ -84,9 +79,20 @@ public class ReservationService {
         // Sorted once and used for locking, hashing and the response. Java's String order matches the
         // ascii_bin collation of seat_label, so every transaction locks overlapping seats in the same order.
         List<String> sortedLabels = seatLabels.stream().sorted().toList();
-        ReservePrecheck precheck = showDao.findWithTakenSeats(showId, sortedLabels)
+        String requestHash = requestHash(showId, sortedLabels);
+        // Fast path: one plain read (no transaction, no locks) that can only turn a request away or hand back an
+        // existing reservation; it never reserves anything (read-then-reject, not read-then-write). Without it, the
+        // hundreds of losers of a hot seat would each open a transaction and queue for the seat, and time out into
+        // 429s. A stale read can only decline a seat released a moment ago, never sell one twice: the transaction
+        // below is still the only place a seat is confirmed.
+        ReservePrecheck precheck = reservationDao.precheck(showId, sortedLabels, userId, idempotencyKey)
                 .orElseThrow(() -> new NotFoundException("Show not found"));
         Show show = precheck.show();
+        // A key that was already used decides the answer on its own: same request → the original reservation (200),
+        // different request → 409. Checked first so a retry never gets "seat taken" for a seat it holds itself.
+        if (precheck.existingReservation().isPresent()) {
+            return replayOrReject(precheck.existingReservation().get(), requestHash);
+        }
         // Seats are never deleted, so a label missing now is missing for good: 400 before any transaction.
         if (precheck.existingSeats() != sortedLabels.size()) {
             throw new BadRequestException("One or more requested seats do not exist in this show");
@@ -96,8 +102,10 @@ public class ReservationService {
         if (seatLabels.size() > show.perUserLimit()) {
             throw perUserLimitExceeded(show);
         }
+        if (precheck.takenSeats() > 0) {
+            throw new ConflictException(DeclineReason.SEAT_TAKEN, "One or more requested seats are not available");
+        }
 
-        String requestHash = requestHash(showId, sortedLabels);
         Reservation reservation = new Reservation(
                 UUID.randomUUID(),
                 showId,
@@ -107,22 +115,6 @@ public class ReservationService {
                 ReservationStatus.CONFIRMED,
                 idempotencyKey,
                 requestHash);
-
-        // Fast path: the plain read above (no transaction, no locks). It only ever turns a request away early; it never
-        // reserves anything (read-then-reject, not read-then-write). Without it, the hundreds of losers of a hot
-        // seat would each hold a DB connection while queueing on that seat's row lock, and time out into 429s.
-        // A stale read here can only decline a seat that was released a moment ago, never sell one twice: the
-        // locked transaction below is still the only place a seat is confirmed.
-        if (precheck.takenSeats() > 0) {
-            // Seats taken, but maybe by this very request's earlier attempt: a retry must get its reservation back,
-            // not a 409. Seat and reservation commit in one transaction, so if the seat read above saw our seat
-            // taken, this later read is guaranteed to see our reservation. (Reading the key first would race.)
-            Optional<Reservation> existing = reservationDao.findByUserAndIdempotencyKey(userId, idempotencyKey);
-            if (existing.isPresent()) {
-                return replayOrReject(existing.get(), requestHash);
-            }
-            throw new ConflictException(DeclineReason.SEAT_TAKEN, "One or more requested seats are not available");
-        }
 
         try {
             // Any exception thrown inside rolls the whole transaction back: no reservation row, no seat changed.
