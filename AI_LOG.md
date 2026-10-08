@@ -190,3 +190,12 @@ Per milestone: what the AI produced, and what I decided or changed.
 
 **AI produced**
 - The pre-check is now one statement for show + seat counts + this user's reservation for this key (`ReservationDao.precheck`, LEFT JOIN). One round trip per loser, and race-free because one SELECT is one snapshot. Replaces `ShowDao.findWithTakenSeats`.
+
+**Fourth live burst (one-statement pre-check)**: **every check PASS**. 20,000 requests, 389 req/s (storm 283 req/s), zero 5xx, each hot seat 1 × 201 + 499 × 409, no seat sold twice, idempotency and per-user limit held, invariant held in all mid-burst snapshots, metrics reconciled exactly. 83 × 429 remained, all in the general stampede (waited > 10 s for a connection).
+
+| Live run | Change | req/s | 429s | hot seats passing |
+|---|---|---|---|---|
+| 1 | first deploy, pool 30 | 150 | 2,657 | 1/5 |
+| 2 | pool 50, merged show + seat check | 250 | 803 | 0/5 |
+| 3 | single-seat skips explicit lock, 30 idle | 265 | 264 | 2/5 |
+| 4 | one-statement pre-check incl. key lookup | 389 | 83 | 5/5 |

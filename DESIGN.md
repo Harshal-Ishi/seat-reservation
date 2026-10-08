@@ -224,10 +224,9 @@ Every response carries `X-Request-Id`.
 ### Reserve: one transaction, READ COMMITTED
 
 ```
-0. SELECT show (price, limit)                       → 404 if missing
-   validate: seats non-empty, distinct, count <= limit (else 409 per-user-limit)
+0. Controller validation: seats non-empty, distinct, well-formed labels; idempotency key present (else 400)
 
-0b. Fast path: one plain read, no transaction, no locks (also replaces step 0's show lookup)
+0b. Fast path: one plain read, no transaction, no locks
    SELECT show columns,
           (COUNT of requested seats, COUNT of those not 'available'),
           this user's reservation for this idempotency key (LEFT JOIN reservations)
