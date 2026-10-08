@@ -47,18 +47,18 @@ Options: `--requests 20000 --users 3000 --seats 1000 --hot-seats 5 --storm 500 -
 
 ### Burst results against the live URL
 
-Latest run (20,000 requests): **RESULT: PASS**
+Latest run (20,000 requests, 85 seconds after a fresh deploy): **RESULT: PASS**
 
 ```
-Hot-seat storm    2500 requests in   8.82s  (  283 req/s, p50 2527 ms, p99  7068 ms)
-Stampede         17490 requests in  44.95s  (  389 req/s, p50 1927 ms, p99  9373 ms)
+Hot-seat storm    2500 requests in  10.84s  (  231 req/s, p50 3300 ms, p99  8970 ms)
+Stampede         17490 requests in  46.57s  (  376 req/s, p50 2064 ms, p99  9199 ms)
 
-  200  idempotent-replay          95
-  201  confirmed                 942
-  409  idempotency-key-reused      7
-  409  per-user-limit              6
-  409  seat-taken              18867
-  429  overloaded                 83
+  200  idempotent-replay          96
+  201  confirmed                 939
+  409  idempotency-key-reused     11
+  409  per-user-limit              7
+  409  seat-taken              18946
+  429  overloaded                  1
   5xx                              0
 
 Hot seats A12–A16: each 1 × 201, 499 × 409
@@ -74,6 +74,7 @@ How it got there (every run: zero 5xx, no seat sold twice, invariant held):
 | 2 | pool 50; show lookup + seat check in one statement | 250 | 803 | 0/5 |
 | 3 | single-seat requests skip the explicit row lock | 265 | 264 | 2/5 |
 | 4 | pre-check incl. idempotency key in one statement | 389 | 83 | 5/5 |
+| 5 | Tomcat accept queue 1,000 (no connection resets in a burst) | 376 | 1 | 5/5 |
 
 The same burst against the local Docker stack (database on the same machine): ~2,200–5,000 req/s, zero 429s.
 

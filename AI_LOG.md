@@ -204,3 +204,5 @@ Per milestone: what the AI produced, and what I decided or changed.
 - Cause: Tomcat's default accept queue is 100; 1,000 connections arriving at once overflow it and the OS/port-forwarder resets the rest.
 - Fix: `server.tomcat.accept-count: 1000` (`SERVER_ACCEPT_COUNT`). Three local runs after: all PASS, zero transport errors.
 - Burst script: the hot-seat check now judges HTTP responses only, and says how many requests got no response; those still show as a transport WARN.
+
+**Fifth live burst (final build, accept-count 1000), 85 s after a redeploy**: **PASS**. 20,000 requests, zero 5xx, 1 × 429, each hot seat 1 × 201 + 499 × 409, invariant held in 11 mid-burst snapshots, metrics reconciled exactly. README results updated to this run.
