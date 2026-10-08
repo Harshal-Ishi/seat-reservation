@@ -199,3 +199,8 @@ Per milestone: what the AI produced, and what I decided or changed.
 | 2 | pool 50, merged show + seat check | 250 | 803 | 0/5 |
 | 3 | single-seat skips explicit lock, 30 idle | 265 | 264 | 2/5 |
 | 4 | one-statement pre-check incl. key lookup | 389 | 83 | 5/5 |
+
+**Local run by me (`./burst.sh http://localhost:8080`)**: server side clean (0 × 5xx, 0 × 429, metrics reconciled), but 14 requests got no HTTP response at all (`connection-error`), which failed two hot-seat checks. App logs showed nothing: the connections were reset before reaching the app.
+- Cause: Tomcat's default accept queue is 100; 1,000 connections arriving at once overflow it and the OS/port-forwarder resets the rest.
+- Fix: `server.tomcat.accept-count: 1000` (`SERVER_ACCEPT_COUNT`). Three local runs after: all PASS, zero transport errors.
+- Burst script: the hot-seat check now judges HTTP responses only, and says how many requests got no response; those still show as a transport WARN.

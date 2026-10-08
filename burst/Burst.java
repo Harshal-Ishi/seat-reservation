@@ -233,14 +233,21 @@ public class Burst {
         }
     }
 
+    /**
+     * Judges the HTTP responses the service gave. A request that got no response at all (connection reset or
+     * timeout before any status) is not a seat decision; it is counted and reported, and the transport WARN covers it.
+     */
     private void checkHotSeats(List<Outcome> storm, List<String> hotSeats) {
         for (String seat : hotSeats) {
             List<Outcome> forSeat = storm.stream().filter(o -> o.attempt().seats().contains(seat)).toList();
-            long wins = forSeat.stream().filter(o -> o.status() == 201).count();
-            long cleanDeclines = forSeat.stream().filter(o -> o.status() == 409).count();
+            List<Outcome> answered = forSeat.stream().filter(o -> o.status() != -1).toList();
+            long wins = answered.stream().filter(o -> o.status() == 201).count();
+            long cleanDeclines = answered.stream().filter(o -> o.status() == 409).count();
+            long noResponse = forSeat.size() - answered.size();
             check("Hot seat " + seat + ": exactly one 201, everyone else 409",
-                    wins == 1 && wins + cleanDeclines == forSeat.size(),
-                    wins + " × 201, " + cleanDeclines + " × 409 of " + forSeat.size());
+                    wins == 1 && wins + cleanDeclines == answered.size(),
+                    wins + " × 201, " + cleanDeclines + " × 409 of " + answered.size() + " responses"
+                            + (noResponse > 0 ? " (" + noResponse + " requests got no HTTP response)" : ""));
         }
     }
 

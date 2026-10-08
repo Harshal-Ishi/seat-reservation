@@ -40,6 +40,10 @@ spring:
 server:
   # Hosting platforms inject PORT.
   port: ${PORT:8080}
+  tomcat:
+    # Connections waiting to be accepted when they all arrive at once. The default (100) is too small for an
+    # on-sale burst: extra connections get reset by the OS before the app ever sees them.
+    accept-count: ${SERVER_ACCEPT_COUNT:1000}
 
 logging:
   structured:
